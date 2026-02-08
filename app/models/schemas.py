@@ -1,11 +1,13 @@
 """
-Pydantic models for request/response validation
+Pydantic models for request and response validation.
 """
-from typing import Optional, Dict, Any, Literal
-from pydantic import BaseModel, Field
-
+from __future__ import annotations
 
 from enum import Enum
+from typing import Any, Dict, List, Literal, Optional
+
+from pydantic import BaseModel, Field, model_validator
+
 
 class RunStatus(str, Enum):
     CREATED = "created"
@@ -22,92 +24,103 @@ class RunStatus(str, Enum):
 
 
 class AgentRequest(BaseModel):
-    """User request for infrastructure deployment"""
-    request: str = Field(
-        ...,
+    """User request for infrastructure deployment."""
+
+    request: Optional[str] = Field(
+        default="",
         description="Natural language description of desired infrastructure",
-        min_length=10,
-        max_length=500
+        max_length=1000,
     )
-    
-    provider: Literal["aws", "gcp"] = Field(
-        default="aws",
-        description="Cloud provider (aws or gcp)"
-    )
-    
-    auto_approve: bool = Field(
-        default=False,
-        description="Auto-approve terraform apply (use with caution)"
-    )
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "request": "Create a web server with HTTP and HTTPS access",
-                "provider": "aws",
-                "auto_approve": False
-            }
-        }
+    provider: Literal["aws", "gcp"] = Field(default="aws")
+    region: Optional[str] = Field(default=None)
+    method: Optional[Literal["natural_language", "template"]] = Field(default="natural_language")
+    template_id: Optional[str] = Field(default=None)
+    template_inputs: Optional[Dict[str, Any]] = Field(default=None)
+    auto_approve: bool = Field(default=False)
+
+    @model_validator(mode="after")
+    def validate_request_content(self) -> "AgentRequest":
+        if self.method == "template":
+            if not self.template_id:
+                raise ValueError("template_id is required when method='template'")
+        else:
+            if not self.request or len(self.request.strip()) < 10:
+                raise ValueError("request must be at least 10 characters when method='natural_language'")
+        return self
 
 
 class TerraformBundle(BaseModel):
-    """Generated Terraform configuration files"""
-    main_tf: str = Field(..., description="Main Terraform configuration (main.tf)")
-    variables_tf: str = Field(..., description="Variables definition (variables.tf)")
-    outputs_tf: str = Field(..., description="Outputs definition (outputs.tf)")
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "main_tf": "terraform { ... }",
-                "variables_tf": "variable \"instance_type\" { ... }",
-                "outputs_tf": "output \"instance_id\" { ... }"
-            }
-        }
+    """Generated Terraform configuration files."""
+
+    main_tf: str = Field(..., description="main.tf content")
+    variables_tf: str = Field(..., description="variables.tf content")
+    outputs_tf: str = Field(..., description="outputs.tf content")
 
 
 class RunResponse(BaseModel):
-    """Response from a Terraform run (State)"""
-    run_id: str = Field(..., description="Unique identifier for this run")
-    status: RunStatus = Field(..., description="Current status of the run")
-    provider: str = Field(..., description="Cloud provider used: 'aws' or 'gcp'")
-    log_path: str = Field(..., description="Path to run logs and workspace")
-    
-    # Optional fields populated as run progresses
-    plan_output: Optional[str] = Field(None, description="Terraform plan output")
-    cost_estimate: Optional[Dict[str, Any]] = Field(None, description="Cost estimation details")
-    
-    outputs: Optional[Dict[str, Any]] = Field(
-        None,
-        description="Terraform outputs (only present on success)"
-    )
-    error: Optional[str] = Field(
-        None,
-        description="Error message (only present on failure)"
-    )
-    
+    """Response from a Terraform run."""
+
+    run_id: str
+    status: RunStatus
+    provider: str
+    log_path: str
+    request: Optional[str] = None
+    region: Optional[str] = None
+    method: Optional[str] = "natural_language"
+    template_id: Optional[str] = None
+    template_name: Optional[str] = None
+    terraform_code: Optional[TerraformBundle] = None
+    plan_output: Optional[str] = None
+    cost_estimate: Optional[Dict[str, Any]] = None
+    estimated_cost: Optional[float] = None
+    resources_add: Optional[int] = 0
+    resources_change: Optional[int] = 0
+    resources_destroy: Optional[int] = 0
+    duration: Optional[int] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    outputs: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
     class Config:
         use_enum_values = True
-        json_schema_extra = {
-            "example": {
-                "run_id": "run_20260207_203000_abc123",
-                "status": "planned",
-                "provider": "aws",
-                "log_path": "runs/run_20260207_203000_abc123",
-                "cost_estimate": {"total_monthly_cost": "25.50", "currency": "USD"},
-                "outputs": None
-            }
-        }
 
 
 class ChatRequest(BaseModel):
-    """User message for the chatbot"""
-    message: str = Field(..., description="User's question or instruction", min_length=1)
+    message: str = Field(..., min_length=1, max_length=2000)
 
 
 class ChatResponse(BaseModel):
-    """Chatbot response"""
-    response: str = Field(..., description="Assistant's reply")
-    timestamp: str = Field(..., description="Timestamp of response")
+    response: str
+    timestamp: str
 
 
+class AdminConfirmRequest(BaseModel):
+    confirmation: str = Field(..., min_length=1)
+
+
+class SettingsUpdateRequest(BaseModel):
+    settings: Dict[str, Any]
+
+
+class TemplateParameter(BaseModel):
+    """Parameter definition for a template"""
+    name: str
+    label: str
+    type: Literal["select", "number", "text", "boolean"]
+    required: bool = True
+    default: Optional[Any] = None
+    options: Optional[List[Dict[str, str]]] = None
+    min: Optional[int] = None
+    max: Optional[int] = None
+    description: Optional[str] = None
+
+
+class TemplateDefinition(BaseModel):
+    id: str
+    name: str
+    description: str
+    category: str
+    providers: List[str]
+    chips: List[str]
+    parameters: List[TemplateParameter] = []

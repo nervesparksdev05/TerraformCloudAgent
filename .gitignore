@@ -16,18 +16,26 @@ parts/
 sdist/
 var/
 wheels/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
 # Virtual Environment
 venv/
 env/
 ENV/
+env.bak/
+venv.bak/
 .venv
 
 # Environment Variables
 .env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 .env.local
 
 # IDE
@@ -36,10 +44,19 @@ ENV/
 *.swp
 *.swo
 *~
+.project
+.classpath
+.cproject
+.settings/
+.launch
 
 # Logs
 logs/
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # Terraform
 runs/
@@ -52,9 +69,41 @@ tfplan
 
 # OS
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
 
 # Testing
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.tox/
+
+# Node.js / Frontend
+node_modules/
+/dist
+.eslintcache
+.stylelintcache
+pnpm-lock.yaml  # If using npm/yarn primarily
+package-lock.json # If using yarn/pnpm primarily (comment out appropriate lockfile if needed)
+yarn.lock         # Same logic
+
+# Build outputs
+frontend/dist/
+frontend/build/
+backend/dist/
+
+# Project Specific
+data/
+site/
+.mypy_cache/
+.ruff_cache/

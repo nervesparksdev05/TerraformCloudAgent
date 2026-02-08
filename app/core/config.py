@@ -9,6 +9,7 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.7"))
+OPENAI_TIMEOUT = int(os.getenv("OPENAI_TIMEOUT", "60"))  # Timeout in seconds
 
 # === Multi-cloud configuration ===
 DEFAULT_PROVIDER = os.getenv("DEFAULT_PROVIDER", "aws")
@@ -19,7 +20,7 @@ MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "terraform_agent")
 
 # === Google Gemini Configuration (Fallback) ===
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 
 # === Langfuse Configuration ===
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY")
@@ -29,7 +30,7 @@ ENABLE_TRACING = bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
 
 # Validate required variables
 if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY is not set in environment variables")
+    print("WARNING: OPENAI_API_KEY not set. Running with mock fallback where applicable.")
 
 if not GOOGLE_API_KEY:
     # Log warning instead of error since it's a fallback
@@ -69,8 +70,9 @@ LOGS_DIR = BASE_DIR / os.getenv("LOGS_DIR", "logs")
 
 # === Terraform ===
 TERRAFORM_TIMEOUT = int(os.getenv("TERRAFORM_TIMEOUT", "300"))
+# Mock Mode: Simulate Terraform commands without real cloud access
+MOCK_MODE = os.getenv("MOCK_MODE", "False").lower() == "true"
 
 # === Security ===
 # Security validation is now handled in security_checker.py with provider-specific rules
-
 

@@ -73,27 +73,62 @@ class TerraformRunner:
     def _run_init(self) -> bool:
         """Run terraform init"""
         logger.info("Running: terraform init")
+        
+        if config.MOCK_MODE:
+            logger.info("[MOCK] Simulating terraform init success")
+            self._write_mock_log("terraform init", "Terraform has been successfully initialized! (MOCK)")
+            return True
+            
         return self._run_command(["terraform", "init", "-no-color"])
     
     def _run_plan(self) -> str:
         """Run terraform plan and return summary"""
         logger.info("Running: terraform plan")
+        
+        if config.MOCK_MODE:
+            logger.info("[MOCK] Simulating terraform plan success")
+            mock_output = "Plan: 1 to add, 0 to change, 0 to destroy. (MOCK)"
+            self._write_mock_log("terraform plan", mock_output)
+            return mock_output
+            
         success = self._run_command(["terraform", "plan", "-no-color", "-out=tfplan"])
         return "Plan created" if success else ""
     
     def _run_apply(self) -> bool:
         """Run terraform apply"""
         logger.info("Running: terraform apply")
+        
+        if config.MOCK_MODE:
+            logger.info("[MOCK] Simulating terraform apply success")
+            self._write_mock_log("terraform apply", "Apply complete! Resources: 1 added, 0 changed, 0 destroyed. (MOCK)")
+            return True
+            
         return self._run_command(["terraform", "apply", "-auto-approve", "-no-color", "tfplan"])
     
     def _run_destroy(self) -> bool:
         """Run terraform destroy"""
         logger.info("Running: terraform destroy")
+        
+        if config.MOCK_MODE:
+            logger.info("[MOCK] Simulating terraform destroy success")
+            self._write_mock_log("terraform destroy", "Destroy complete! Resources: 1 destroyed. (MOCK)")
+            return True
+            
         return self._run_command(["terraform", "destroy", "-auto-approve", "-no-color"])
     
     def _get_outputs(self) -> Optional[Dict[str, Any]]:
         """Get terraform outputs as JSON"""
         logger.info("Getting Terraform outputs")
+        
+        if config.MOCK_MODE:
+            logger.info("[MOCK] Returning fake outputs")
+            return {
+                "instance_id": "i-mock-1234567890abcdef0",
+                "public_ip": "192.0.2.1",
+                "bucket_name": "mock-bucket-name",
+                "db_endpoint": "mock-db.cluster-xyz.us-east-1.rds.amazonaws.com"
+            }
+
         try:
             result = subprocess.run(
                 ["terraform", "output", "-json"],
@@ -115,6 +150,15 @@ class TerraformRunner:
         except Exception as e:
             logger.warning(f"Failed to get outputs: {str(e)}")
             return None
+
+    def _write_mock_log(self, command: str, output: str):
+        """Helper to write mock output to log file"""
+        if self.log_file:
+            self.log_file.write(f"\n{'='*60}\n")
+            self.log_file.write(f"Command: {command} (MOCK MODE)\n")
+            self.log_file.write(f"{'='*60}\n")
+            self.log_file.write(output + "\n")
+            self.log_file.flush()
     
     def _run_command(self, cmd: list) -> bool:
         """

@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any
 
 from openai import OpenAI
 from langfuse.decorators import observe, langfuse_context
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.core import config
 from app.core.logger import get_logger
@@ -22,7 +23,13 @@ class LLMGenerator:
         if not config.OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY not configured")
         
-        self.client = OpenAI(api_key=config.OPENAI_API_KEY)
+        # Initialize OpenAI client with timeout to prevent indefinite hangs
+        self.client = OpenAI(
+            api_key=config.OPENAI_API_KEY,
+            timeout=config.OPENAI_TIMEOUT
+        )
+        self._supports_json_response_format: Optional[bool] = None
+        self._supports_custom_temperature: Optional[bool] = None
         
         # Load both AWS and GCP focused prompts
         self.prompts = {
@@ -56,19 +63,8 @@ class LLMGenerator:
         
         try:
             logger.debug(f"Generating {provider.upper()} Terraform code with OpenAI: {request}")
-            
-            response = self.client.chat.completions.create(
-                model=config.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=config.OPENAI_TEMPERATURE,
-                response_format={"type": "json_object"}
-            )
-            
-            content = response.choices[0].message.content
-            terraform_data = json.loads(content)
+
+            terraform_data = self._openai_json_response(system_prompt, user_prompt)
             
             logger.debug(f"Successfully generated {provider.upper()} Terraform code with OpenAI")
             return TerraformBundle(**terraform_data)
@@ -113,7 +109,12 @@ class LLMGenerator:
             }
         }
         
-        response = requests.post(url, json=payload, headers={"Content-Type": "application/json"})
+        response = requests.post(
+            url, 
+            json=payload, 
+            headers={"Content-Type": "application/json"},
+            timeout=config.OPENAI_TIMEOUT
+        )
         
         if response.status_code != 200:
             raise Exception(f"Gemini API Error {response.status_code}: {response.text}")
@@ -123,6 +124,70 @@ class LLMGenerator:
             return result["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError) as e:
             raise Exception(f"Failed to parse Gemini response: {str(e)}. Response: {response.text}")
+
+    def _openai_json_response(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+        """Get JSON from OpenAI, retrying without response_format if model does not support it."""
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        if self._supports_json_response_format is not False:
+            try:
+                response = self._create_openai_completion(messages, use_response_format=True)
+                self._supports_json_response_format = True
+                content = response.choices[0].message.content or "{}"
+                return self._clean_json_content(content)
+            except Exception as exc:
+                message = str(exc).lower()
+                unsupported = (
+                    "response_format" in message
+                    and ("not supported" in message or "invalid parameter" in message)
+                )
+                if not unsupported:
+                    raise
+                self._supports_json_response_format = False
+                logger.warning("Model does not support response_format=json_object; retrying without it.")
+
+        response = self._create_openai_completion(messages, use_response_format=False)
+        content = response.choices[0].message.content or "{}"
+        return self._clean_json_content(content)
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((requests.exceptions.Timeout, requests.exceptions.ConnectionError)),
+        reraise=True
+    )
+    def _create_openai_completion(self, messages: list[dict], use_response_format: bool):
+        kwargs = {
+            "model": config.OPENAI_MODEL,
+            "messages": messages,
+        }
+        if use_response_format:
+            kwargs["response_format"] = {"type": "json_object"}
+        if self._supports_custom_temperature is not False:
+            kwargs["temperature"] = config.OPENAI_TEMPERATURE
+
+        try:
+            response = self.client.chat.completions.create(**kwargs)
+            if "temperature" in kwargs:
+                self._supports_custom_temperature = True
+            return response
+        except Exception as exc:
+            message = str(exc).lower()
+            temperature_unsupported = (
+                "temperature" in kwargs
+                and "temperature" in message
+                and ("unsupported" in message or "does not support" in message)
+            )
+            if not temperature_unsupported:
+                raise
+
+            self._supports_custom_temperature = False
+            logger.warning("Model does not support custom temperature; retrying with default temperature.")
+            kwargs.pop("temperature", None)
+            return self.client.chat.completions.create(**kwargs)
 
     def _clean_json_content(self, content: str) -> Dict[str, Any]:
         """Clean JSON content from LLM response (remove markdown blocks)"""
@@ -136,8 +201,16 @@ class LLMGenerator:
             
         if content.endswith("```"):
             content = content[:-3]
-            
-        return json.loads(content.strip())
+
+        cleaned = content.strip()
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                raise
+            return json.loads(cleaned[start : end + 1])
 
     @observe(name="refine_terraform")
     def refine_terraform(
@@ -181,19 +254,8 @@ INSTRUCTIONS:
             
         try:
             logger.debug(f"Refining {provider.upper()} Terraform code: {feedback}")
-            
-            response = self.client.chat.completions.create(
-                model=config.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=config.OPENAI_TEMPERATURE,
-                response_format={"type": "json_object"}
-            )
-            
-            content = response.choices[0].message.content
-            terraform_data = json.loads(content)
+
+            terraform_data = self._openai_json_response(system_prompt, user_prompt)
             
             logger.debug(f"Successfully refined {provider.upper()} Terraform code")
             return TerraformBundle(**terraform_data)
@@ -225,3 +287,36 @@ INSTRUCTIONS:
     def _get_user_prompt(self, request: str) -> str:
         """Format user request as prompt"""
         return f"User Request: {request}\n\nGenerate complete Terraform configuration. Return ONLY valid JSON."
+    
+    @observe(name="chat_response")
+    async def generate_chat_response(self, context: str, question: str) -> str:
+        """Generate intelligent response to user questions about infrastructure"""
+        
+        messages = [
+            {"role": "system", "content": "You are a helpful cloud infrastructure expert. Answer questions about Terraform configurations concisely and accurately."},
+            {"role": "user", "content": context}
+        ]
+        
+        # Add tags to Langfuse trace
+        if config.ENABLE_TRACING:
+            langfuse_context.update_current_trace(
+                tags=["chat", "infrastructure_qa"],
+                input=question
+            )
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=config.OPENAI_MODEL,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=500  # Keep responses concise
+            )
+            
+            answer = response.choices[0].message.content or "I couldn't generate a response."
+            logger.debug(f"Generated chat response for question: {question[:50]}...")
+            return answer
+            
+        except Exception as e:
+            logger.warning(f"Chat response generation failed: {e}")
+            raise
+
