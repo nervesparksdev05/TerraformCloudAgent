@@ -5,6 +5,8 @@ An intelligent **LLM-powered Terraform agent** that converts natural language re
 ## ✨ Key Features
 
 - 🤖 **Natural Language to Infrastructure**: Describe what you want, get Terraform code
+- 🎨 **Modern Web UI**: Full-featured React frontend with real-time updates
+- 📋 **Template Catalog**: 50+ pre-built templates for common infrastructure patterns
 - ☁️ **Multi-Cloud Support**: AWS (15 services) + GCP (15 services)
 - 🔄 **Interactive Workflow**: Plan → Review → Chat/Edit → Approve → Apply → Destroy
 - 🛡️ **Model Fallback**: OpenAI (primary) → Gemini (fallback) for 99.9% uptime
@@ -13,22 +15,21 @@ An intelligent **LLM-powered Terraform agent** that converts natural language re
 - 🔒 **Security First**: Built-in validation and policy enforcement
 - 📦 **Isolated Workspaces**: Each deployment runs in its own directory
 - 🎯 **RESTful API**: FastAPI with async background tasks
+- 📊 **Analytics Dashboard**: Monitor deployments, costs, and resource usage
 
 ## 🏗️ Architecture
 
-See [Architecture Overview](./brain/architecture_overview.md) for detailed diagrams.
+See [Project Walkthrough](./PROJECT_WALKTHROUGH.md) for detailed flow explanation.
 
 ```
-User Request → FastAPI → RunManager → WorkflowEngine
-                            ↓              ↓
-                        MongoDB      LLMGenerator (OpenAI/Gemini)
-                                           ↓
-                                    SecurityChecker
-                                           ↓
-                                    TerraformRunner → AWS/GCP
+User (Web UI) → FastAPI (main.py) → LLMGenerator (OpenAI/Gemini)
+                    ↓                         ↓
+                MongoDB                SecurityChecker
+                    ↓                         ↓
+            WorkspaceManager           TerraformRunner → AWS/GCP
 ```
 
-**State Machine**: `CREATED` → `PLANNING` → `PLANNED` → `REVIEWING` → `APPROVED` → `APPLYING` → `COMPLETED` → `DESTROYING` → `DESTROYED`
+**State Machine**: `CREATED` → `PLANNING` → `PLANNED` → `APPROVED` → `APPLYING` → `COMPLETED` → `DESTROYING` → `DESTROYED`
 
 ## 🚦 Quick Start
 
@@ -93,18 +94,31 @@ GCP_REGION=us-central1
 GCP_CREDENTIALS_PATH=path/to/service-account.json
 ```
 
-### Run
+### Run Backend
 
 ```bash
-# Start server
-uvicorn app.main_async:app --reload --port 8000
-
-# Or run directly
-python -m app.main_async
+# Start backend server
+uvicorn app.main:app --reload --port 8000
 ```
 
-Server: `http://localhost:8000`  
+Backend: `http://localhost:8000`  
 API Docs: `http://localhost:8000/docs`
+
+### Run Frontend
+
+```bash
+# Navigate to frontend directory
+cd frontend
+
+# Install dependencies (first time only)
+npm install
+
+# Start development server
+npm run dev
+```
+
+Frontend: `http://localhost:5173`  
+The frontend will automatically proxy API requests to the backend.
 
 ## 📖 API Usage
 
@@ -286,25 +300,38 @@ Compute Engine, Cloud Functions, Cloud Run, Cloud Storage, Persistent Disk, Clou
 TerraformCloudAgent/
 ├── app/
 │   ├── core/
-│   │   ├── config.py           # Environment configuration
-│   │   ├── database.py         # MongoDB service
-│   │   └── logger.py           # Logging setup
+│   │   ├── config.py              # Environment configuration
+│   │   ├── database.py            # MongoDB service
+│   │   └── logger.py              # Logging setup
 │   ├── models/
-│   │   └── schemas.py          # Pydantic models
+│   │   └── schemas.py             # Pydantic models
 │   ├── services/
-│   │   ├── llm_generator.py    # OpenAI/Gemini integration
-│   │   ├── security_checker.py # Policy validation
-│   │   ├── run_manager.py      # State management
-│   │   ├── workflow_engine.py  # Orchestration
-│   │   └── terraform_runner.py # Terraform execution
+│   │   ├── llm_generator.py       # OpenAI/Gemini integration
+│   │   ├── security_checker.py    # Policy validation
+│   │   ├── terraform_runner.py    # Terraform execution
+│   │   ├── workspace_manager.py   # Workspace management
+│   │   ├── templates_catalog.py   # Template definitions
+│   │   ├── insights_service.py    # Analytics & monitoring
+│   │   └── settings_store.py      # User settings
 │   ├── prompts/
 │   │   ├── aws_focused_system_prompt.txt
 │   │   └── gcp_focused_system_prompt.txt
-│   └── main_async.py           # FastAPI application
-├── runs/                       # Workspace directories
-├── logs/                       # Application logs
-├── .env                        # Environment variables
-└── requirements.txt
+│   └── main.py                    # FastAPI application
+├── frontend/
+│   ├── client/
+│   │   ├── src/                   # React source code
+│   │   ├── public/                # Static assets
+│   │   └── index.html             # HTML entry point
+│   ├── shared/
+│   │   └── schema.ts              # TypeScript types
+│   ├── package.json
+│   ├── vite.config.ts
+│   └── tailwind.config.ts
+├── runs/                          # Workspace directories
+├── logs/                          # Application logs
+├── .env                           # Environment variables
+├── requirements.txt               # Python dependencies
+└── PROJECT_WALKTHROUGH.md         # Code flow documentation
 ```
 
 ## 🚀 Production Readiness
@@ -350,11 +377,11 @@ docker-compose up -d
 
 ## 📚 Documentation
 
-- [Architecture Overview](./brain/architecture_overview.md) - System design and flow diagrams
-- [Implementation Plan](./brain/implementation_plan.md) - Technical implementation details
-- [Production Readiness](./brain/production_readiness.md) - Deployment checklist
-- [MongoDB Integration](./brain/mongodb_integration.md) - Database setup guide
-- [Destroy Implementation](./brain/destroy_implementation.md) - Infrastructure cleanup
+- [Project Walkthrough](./PROJECT_WALKTHROUGH.md) - End-to-end code flow explanation
+- [Langfuse Integration](./LANGFUSE_INTEGRATION.md) - LLM observability setup
+- [Security Checker Fix](./SECURITY_CHECKER_FIX.md) - Security validation details
+- [Testing Guide](./TESTING_GUIDE.md) - How to test the application
+- [Template Parameters](./TEMPLATE_PARAMETERS_STATUS.md) - Template system documentation
 
 ## 🎯 Roadmap
 
@@ -364,10 +391,13 @@ docker-compose up -d
 - [x] MongoDB persistence
 - [x] Langfuse observability
 - [x] Terraform destroy
+- [x] Frontend UI (React + Vite + Tailwind)
+- [x] Template catalog (50+ templates)
+- [x] Analytics dashboard
 - [ ] Cost estimation (Infracost)
 - [ ] Authentication & rate limiting
-- [ ] WebSocket logs
-- [ ] Frontend UI (React/Next.js)
+- [ ] WebSocket real-time logs
+- [ ] Multi-user support
 
 ## 🤝 Contributing
 
