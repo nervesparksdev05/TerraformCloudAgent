@@ -1,12 +1,10 @@
-"""
-LLM service for generating Terraform code using OpenAI
-"""
+"""LLM Terraform Generator — Uses rich conversation params for production EC2 code."""
+from __future__ import annotations
+
 import json
-import requests
-from typing import Optional, Dict, Any
+from typing import Any, Dict
 
 from openai import OpenAI
-from langfuse.decorators import observe, langfuse_context
 
 from app.core import config
 from app.core.logger import get_logger
@@ -16,212 +14,455 @@ logger = get_logger(__name__)
 
 
 class LLMGenerator:
-    """Service for generating Terraform code using OpenAI LLM"""
+    """Generate production-grade Terraform code from structured conversation parameters.
     
-    def __init__(self):
+    Supports: AWS EC2, GCP Compute Engine, Azure VMs, DigitalOcean Droplets.
+    """
+
+    SYSTEM_PROMPT = """\
+You are an expert Terraform code generator for multi-cloud infrastructure (AWS, GCP, Azure, DigitalOcean).
+
+OUTPUT FORMAT — Return ONLY valid JSON with exactly these 3 keys:
+{
+  "main_tf": "complete main.tf HCL content with \\n newlines",
+  "variables_tf": "complete variables.tf HCL content with \\n newlines",
+  "outputs_tf": "complete outputs.tf HCL content with \\n newlines"
+}
+
+FORMATTING (CRITICAL):
+- Each HCL block on separate lines using \\n
+- 2-space indentation per nesting level
+- Blank line (\\n\\n) between resource blocks
+- Properly escaped quotes: \\"
+
+═══════════════════════════════════════════════════════════════
+REQUIRED BLOCKS IN main.tf (IN THIS ORDER)
+═══════════════════════════════════════════════════════════════
+
+1. TERRAFORM & PROVIDER BLOCKS (always include):
+terraform {
+  required_version = ">= 1.5"
+  required_providers {
+    aws = { source = "hashicorp/aws", version = "~> 5.0" }
+    tls = { source = "hashicorp/tls", version = "~> 4.0" }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+  default_tags {
+    tags = {
+      Environment = var.environment
+      Project     = var.project_name
+      ManagedBy   = "terraform"
+    }
+  }
+}
+
+2. DATA SOURCES (always include these):
+# Find latest AMI
+data "aws_ami" "selected" {
+  most_recent = true
+  owners      = ["099720109477"]  # Canonical for Ubuntu, "amazon" for Amazon Linux
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]  # Adjust based on ami_os param
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+# Get available AZs
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+# IAM policy document for instance role
+data "aws_iam_policy_document" "instance_assume_role" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+  }
+}
+
+# IAM policy for instance permissions
+data "aws_iam_policy_document" "instance_policy" {
+  # CloudWatch logs (always include)
+  statement {
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+      "cloudwatch:PutMetricData"
+    ]
+    resources = ["*"]
+  }
+
+  # SSM (always include)
+  statement {
+    actions = [
+      "ssm:UpdateInstanceInformation",
+      "ssm:GetParameter",
+      "ssm:GetParameters"
+    ]
+    resources = ["*"]
+  }
+
+  # Add additional service permissions based on user's iam_services parameter
+}
+
+3. TLS PRIVATE KEY (for SSH access):
+resource "tls_private_key" "instance_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "instance_key" {
+  key_name   = "${var.project_name}-${var.environment}-key"
+  public_key = tls_private_key.instance_key.public_key_openssh
+}
+
+4. VPC & NETWORKING:
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags = { Name = "${var.project_name}-${var.environment}-vpc" }
+}
+
+resource "aws_subnet" "public" {
+  count                   = var.subnet_count
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)
+  availability_zone       = element(data.aws_availability_zones.available.names, count.index)
+  map_public_ip_on_launch = true
+  tags = { Name = "${var.project_name}-${var.environment}-public-${count.index + 1}" }
+}
+
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+  tags   = { Name = "${var.project_name}-${var.environment}-igw" }
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+  tags = { Name = "${var.project_name}-${var.environment}-public-rt" }
+}
+
+resource "aws_route_table_association" "public" {
+  count          = var.subnet_count
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+5. SECURITY GROUP:
+resource "aws_security_group" "instance" {
+  vpc_id = aws_vpc.main.id
+  name   = "${var.project_name}-${var.environment}-instance-sg"
+
+  # Add ingress rules from ports parameter
+  # Example: port 80, 443 from 0.0.0.0/0; port 22 from ssh_allowed_cidrs
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+6. IAM ROLE & INSTANCE PROFILE:
+resource "aws_iam_role" "instance" {
+  name               = "${var.project_name}-${var.environment}-instance-role"
+  assume_role_policy = data.aws_iam_policy_document.instance_assume_role.json
+}
+
+resource "aws_iam_role_policy" "instance" {
+  role   = aws_iam_role.instance.id
+  policy = data.aws_iam_policy_document.instance_policy.json
+}
+
+resource "aws_iam_instance_profile" "instance" {
+  name = "${var.project_name}-${var.environment}-instance-profile"
+  role = aws_iam_role.instance.name
+}
+
+7. EC2 INSTANCES:
+resource "aws_instance" "main" {
+  count                = var.instance_count
+  ami                  = data.aws_ami.selected.id
+  instance_type        = var.instance_type
+  key_name             = aws_key_pair.instance_key.key_name
+  subnet_id            = element(aws_subnet.public[*].id, count.index)
+  vpc_security_group_ids = [aws_security_group.instance.id]
+  iam_instance_profile = aws_iam_instance_profile.instance.name
+
+  root_block_device {
+    volume_size           = var.storage_size_gb
+    volume_type           = var.storage_type
+    encrypted             = true
+    delete_on_termination = true
+  }
+
+  metadata_options {
+    http_tokens   = "required"
+    http_endpoint = "enabled"
+  }
+
+  tags = { Name = "${var.project_name}-${var.environment}-${count.index + 1}" }
+}
+
+8. LOAD BALANCER (if load_balancer_type != "none"):
+# Add ALB/NLB resources if requested
+
+═══════════════════════════════════════════════════════════════
+VARIABLES.TF MUST INCLUDE
+═══════════════════════════════════════════════════════════════
+
+variable "aws_region" {
+  type    = string
+  default = "<from params>"
+}
+
+variable "environment" {
+  type = string
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "Environment must be dev, staging, or prod"
+  }
+}
+
+variable "project_name" {
+  type    = string
+  default = "<infer from workload_description or use 'app'>"
+}
+
+variable "instance_type" { type = string }
+variable "instance_count" { type = number }
+variable "storage_size_gb" { type = number }
+variable "storage_type" { type = string }
+variable "vpc_cidr" { type = string }
+variable "subnet_count" { type = number }
+
+variable "ssh_allowed_cidrs" {
+  type        = list(string)
+  description = "CIDRs allowed to SSH"
+}
+
+═══════════════════════════════════════════════════════════════
+OUTPUTS.TF MUST INCLUDE
+═══════════════════════════════════════════════════════════════
+
+output "instance_ids" {
+  value = aws_instance.main[*].id
+}
+
+output "public_ips" {
+  value = aws_instance.main[*].public_ip
+}
+
+output "private_ips" {
+  value = aws_instance.main[*].private_ip
+}
+
+output "ssh_private_key" {
+  value     = tls_private_key.instance_key.private_key_pem
+  sensitive = true
+}
+
+output "vpc_id" {
+  value = aws_vpc.main.id
+}
+
+output "security_group_id" {
+  value = aws_security_group.instance.id
+}
+
+output "iam_role_arn" {
+  value = aws_iam_role.instance.arn
+}
+
+═══════════════════════════════════════════════════════════════
+CRITICAL RULES
+═══════════════════════════════════════════════════════════════
+
+✅ MUST INCLUDE:
+- All data sources (aws_ami, aws_availability_zones, aws_iam_policy_document)
+- TLS private key resource
+- IAM role, policy, instance profile
+- VPC with internet gateway and route table
+- Security group with user-specified ports
+- EC2 instances with encryption, IMDSv2, IAM profile
+
+❌ NEVER:
+- Hardcode AMI IDs (use data.aws_ami)
+- Hardcode credentials
+- Allow 0.0.0.0/0 for SSH
+- Reference non-existent data sources
+- Forget to define resources you reference in outputs
+
+🎯 VALIDATION:
+- Every resource referenced in outputs MUST be defined in main.tf
+- Every variable in main.tf MUST be defined in variables.tf
+- Code MUST pass `terraform validate`
+"""
+
+    def __init__(self) -> None:
         if not config.OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY not configured")
-        
         self.client = OpenAI(api_key=config.OPENAI_API_KEY)
-        
-        # Load both AWS and GCP focused prompts
-        self.prompts = {
-            "aws": self._load_prompt("aws_focused_system_prompt.txt"),
-            "gcp": self._load_prompt("gcp_focused_system_prompt.txt")
-        }
-        
-        logger.info(f"LLM Generator initialized with model: {config.OPENAI_MODEL}")
-        logger.info(f"Loaded prompts for providers: {list(self.prompts.keys())}")
-    
-    @observe(name="generate_terraform")
+
     def generate_terraform(
-        self, 
-        request: str, 
-        provider: str = "aws"
+        self, params: Dict[str, Any], provider: str = "aws"
     ) -> TerraformBundle:
-        """Generate Terraform configuration from natural language request"""
-        
-        if provider not in self.prompts:
-            raise ValueError(f"Unsupported provider: {provider}. Supported: {list(self.prompts.keys())}")
-        
-        system_prompt = self.prompts[provider]
-        user_prompt = self._get_user_prompt(request)
-        
-        # Add tags to Langfuse trace
-        if config.ENABLE_TRACING:
-            langfuse_context.update_current_trace(
-                tags=[provider, "terraform_generation"],
-                input=request
-            )
-        
-        try:
-            logger.debug(f"Generating {provider.upper()} Terraform code with OpenAI: {request}")
-            
-            response = self.client.chat.completions.create(
-                model=config.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=config.OPENAI_TEMPERATURE,
-                response_format={"type": "json_object"}
-            )
-            
-            content = response.choices[0].message.content
-            terraform_data = json.loads(content)
-            
-            logger.debug(f"Successfully generated {provider.upper()} Terraform code with OpenAI")
-            return TerraformBundle(**terraform_data)
-            
-        except Exception as e:
-            logger.warning(f"OpenAI generation failed: {str(e)}. Attempting fallback to Gemini...")
-            
-            try:
-                # Add metadata about fallback
-                if config.ENABLE_TRACING:
-                    langfuse_context.update_current_trace(
-                        metadata={"fallback_triggered": True, "primary_error": str(e)}
-                    )
-                
-                content = self._call_gemini(system_prompt, user_prompt)
-                terraform_data = self._clean_json_content(content)
-                logger.info(f"Successfully generated {provider.upper()} Terraform code with Gemini fallback")
-                return TerraformBundle(**terraform_data)
-                
-            except Exception as gemini_error:
-                logger.error(f"Gemini fallback also failed: {str(gemini_error)}")
-                raise Exception(f"All LLM generation failed. OpenAI: {str(e)}. Gemini: {str(gemini_error)}")
-    
-    @observe(name="gemini_fallback")
-    def _call_gemini(self, system_prompt: str, user_prompt: str) -> str:
-        """Call Google Gemini API as fallback"""
-        if not config.GOOGLE_API_KEY or config.GOOGLE_API_KEY == "PLACEHOLDER_KEY":
-            raise ValueError("GOOGLE_API_KEY not configured or is placeholder")
-            
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{config.GEMINI_MODEL}:generateContent?key={config.GOOGLE_API_KEY}"
-        
-        # Combine system and user prompt for Gemini as it handles system instructions differently in some versions
-        full_prompt = f"{system_prompt}\n\n{user_prompt}"
-        
-        payload = {
-            "contents": [{
-                "parts": [{"text": full_prompt}]
-            }],
-            "generationConfig": {
-                "temperature": config.OPENAI_TEMPERATURE,
-                "responseMimeType": "application/json"
-            }
-        }
-        
-        response = requests.post(url, json=payload, headers={"Content-Type": "application/json"})
-        
-        if response.status_code != 200:
-            raise Exception(f"Gemini API Error {response.status_code}: {response.text}")
-            
-        try:
-            result = response.json()
-            return result["candidates"][0]["content"]["parts"][0]["text"]
-        except (KeyError, IndexError) as e:
-            raise Exception(f"Failed to parse Gemini response: {str(e)}. Response: {response.text}")
+        """Generate Terraform from structured conversation parameters."""
+        prompt = self._build_prompt(params, provider)
+        return self._call(prompt, self.SYSTEM_PROMPT)
 
-    def _clean_json_content(self, content: str) -> Dict[str, Any]:
-        """Clean JSON content from LLM response (remove markdown blocks)"""
-        content = content.strip()
-        
-        # Remove markdown code blocks if present
-        if content.startswith("```json"):
-            content = content[7:]
-        elif content.startswith("```"):
-            content = content[3:]
-            
-        if content.endswith("```"):
-            content = content[:-3]
-            
-        return json.loads(content.strip())
-
-    @observe(name="refine_terraform")
     def refine_terraform(
         self,
         base_request: str,
         current_code: Dict[str, Any],
         feedback: str,
-        provider: str = "aws"
+        provider: str = "aws",
     ) -> TerraformBundle:
-        """Refine existing Terraform code based on user feedback"""
-        
-        if provider not in self.prompts:
-            raise ValueError(f"Unsupported provider: {provider}")
-            
-        system_prompt = self.prompts[provider]
-        
-        # customized prompt for refinement
-        user_prompt = f"""
-ORIGINAL REQUEST: {base_request}
+        """Refine existing Terraform based on user feedback."""
+        prompt = (
+            f"Original request: {base_request}\n"
+            f"User feedback: {feedback}\n"
+            f"Current code:\n{json.dumps(current_code, indent=2)}\n\n"
+            f"Apply the feedback and return updated JSON with main_tf, variables_tf, outputs_tf."
+        )
+        return self._call(prompt, self.SYSTEM_PROMPT)
 
-CURRENT TERRAFORM CODE:
-```json
-{json.dumps(current_code, indent=2)}
-```
+    def _build_prompt(self, params: Dict[str, Any], provider: str) -> str:
+        """Build a rich, structured prompt from ALL conversation parameters."""
+        p = params  # shorthand
 
-USER FEEDBACK / REQUESTED CHANGES:
-{feedback}
+        # Format ports for readability
+        ports_desc = ""
+        for port_entry in p.get("ports", []):
+            if isinstance(port_entry, dict):
+                ports_desc += (
+                    f"  - Port {port_entry.get('port')}/{port_entry.get('protocol', 'tcp')} "
+                    f"from {port_entry.get('source_cidr', '0.0.0.0/0')} "
+                    f"({port_entry.get('description', '')})\n"
+                )
 
-INSTRUCTIONS:
-1. Update the Terraform code to address the user's feedback.
-2. Keep the rest of the configuration intact unless changes are necessary for the request.
-3. Return the COMPLETE updated Terraform configuration as valid JSON.
-"""
+        # Format IAM services
+        iam_desc = ""
+        for svc, actions in p.get("iam_services", {}).items():
+            iam_desc += f"  - {svc}: {', '.join(actions)}\n"
 
-        # Add tags to Langfuse trace
-        if config.ENABLE_TRACING:
-            langfuse_context.update_current_trace(
-                tags=[provider, "terraform_refinement"],
-                input=feedback
-            )
-            
-        try:
-            logger.debug(f"Refining {provider.upper()} Terraform code: {feedback}")
-            
-            response = self.client.chat.completions.create(
-                model=config.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=config.OPENAI_TEMPERATURE,
-                response_format={"type": "json_object"}
-            )
-            
-            content = response.choices[0].message.content
-            terraform_data = json.loads(content)
-            
-            logger.debug(f"Successfully refined {provider.upper()} Terraform code")
-            return TerraformBundle(**terraform_data)
-            
-        except Exception as e:
-            logger.warning(f"Refinement failed: {str(e)}. Attempting fallback...")
-            # Reuse fallback logic but with new prompt
-            try:
-                content = self._call_gemini(system_prompt, user_prompt)
-                terraform_data = self._clean_json_content(content)
-                return TerraformBundle(**terraform_data)
-            except Exception as gemini_error:
-                 raise Exception(f"All LLM generation failed. OpenAI: {str(e)}. Gemini: {str(gemini_error)}")
+        # Auto-scaling config
+        asg_desc = "Not enabled"
+        if p.get("auto_scaling_enabled") and p.get("auto_scaling_config"):
+            asc = p["auto_scaling_config"]
+            asg_desc = f"min={asc.get('min', 1)}, max={asc.get('max', 4)}, target_cpu={asc.get('target_cpu', 70)}%"
 
-    def _load_prompt(self, filename: str) -> str:
-        """Load system prompt from external file"""
-        prompt_file = config.PROMPTS_DIR / filename
-        
-        try:
-            with open(prompt_file, "r", encoding="utf-8") as f:
-                content = f.read()
-                logger.debug(f"Loaded prompt from {filename} ({len(content)} chars)")
-                return content
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                f"System prompt file not found at {prompt_file}"
-            )
-    
-    def _get_user_prompt(self, request: str) -> str:
-        """Format user request as prompt"""
-        return f"User Request: {request}\n\nGenerate complete Terraform configuration. Return ONLY valid JSON."
+        ssh_cidrs = ", ".join(p.get("ssh_allowed_cidrs", ["10.0.0.0/8"]))
+
+        # Pre-compute fallbacks (Python 3.11 doesn't allow \ in f-string braces)
+        default_ports = (
+            "  - Port 80/tcp from 0.0.0.0/0 (HTTP)\n"
+            "  - Port 443/tcp from 0.0.0.0/0 (HTTPS)\n"
+        )
+        default_iam = (
+            "  - cloudwatch: basic logging\n"
+            "  - ssm: instance management\n"
+        )
+        ports_section = ports_desc if ports_desc else default_ports
+        iam_section = iam_desc if iam_desc else default_iam
+
+        prompt = f"""Generate production-grade AWS EC2 Terraform configuration.
+
+WORKLOAD: {p.get('workload_description', p.get('service_type', 'web server'))}
+ENVIRONMENT: {p.get('environment', 'dev')}
+
+COMPUTE:
+  Instance type: {p.get('instance_type', 't3.micro')}
+  Instance count: {p.get('instance_count', 1)}
+  Region: {p.get('region', 'us-east-1')}
+  OS: {p.get('os_image', 'ubuntu-22.04')} (use data "aws_ami" to find latest)
+
+STORAGE:
+  Root volume: {p.get('storage_size', 20)} GB {p.get('storage_type', 'gp3')}
+  Encrypted: true (always)
+
+NETWORKING:
+  VPC CIDR: {p.get('vpc_cidr', '10.0.0.0/16')}
+  Subnet type: {p.get('subnet_type', 'both')} (public + private)
+  Subnet count: {p.get('subnet_count', 2)} AZs (use data "aws_availability_zones")
+  Public IP: {p.get('enable_public_ip', True)}
+  Load balancer: {p.get('load_balancer_type', 'none')}
+  HTTPS: {p.get('enable_https', False)}
+
+SECURITY GROUP PORTS:
+{ports_section}  SSH allowed CIDRs: {ssh_cidrs}
+
+IAM ROLE ({p.get('iam_role_name', 'app-role')}):
+{iam_section}  Create custom IAM role with data "aws_iam_policy_document".
+  Attach as instance profile.
+
+MONITORING:
+  Detailed monitoring: {p.get('detailed_monitoring', False)}
+  CloudWatch logs: {p.get('cloudwatch_logs_enabled', True)}
+  Log retention: {p.get('log_retention_days', 30)} days
+  CloudWatch log group for application logs
+
+AUTO-SCALING: {asg_desc}
+
+SECURITY HARDENING:
+  IMDSv2: required (http_tokens = "required")
+  SSH key: generate via tls_private_key + aws_key_pair
+  EBS encryption: enabled
+
+CRITICAL REQUIREMENTS:
+1. Use data "aws_ami" with owner and name filters — NO hardcoded AMI IDs
+2. Use data "aws_availability_zones" for multi-AZ subnets
+3. Use data "aws_iam_policy_document" for all IAM policies
+4. All passwords/keys marked sensitive
+5. Proper tags on every resource
+6. Code must pass terraform validate
+7. Return ONLY the JSON object with main_tf, variables_tf, outputs_tf"""
+
+        return prompt
+
+    def _call(
+        self, user_prompt: str, system_prompt: str
+    ) -> TerraformBundle:
+        """Call OpenAI and parse the Terraform JSON response."""
+        resp = self.client.chat.completions.create(
+            model=config.OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+            max_tokens=4096,
+            timeout=30,
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+
+        # Ensure all keys are strings
+        for key in ("main_tf", "variables_tf", "outputs_tf"):
+            val = data.get(key, "")
+            if isinstance(val, dict):
+                data[key] = json.dumps(val, indent=2)
+            else:
+                data[key] = str(val) if val else ""
+
+        return TerraformBundle(**data)

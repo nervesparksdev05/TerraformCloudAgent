@@ -63,12 +63,15 @@ APP_DESCRIPTION = "LLM-powered Terraform agent for AWS and GCP (Top 15 services)
 
 # === Directories ===
 BASE_DIR = Path(__file__).parent.parent.parent
-PROMPTS_DIR = BASE_DIR / "app" / "prompts"
 WORKSPACE_BASE_DIR = BASE_DIR / os.getenv("WORKSPACE_BASE_DIR", "runs")
 LOGS_DIR = BASE_DIR / os.getenv("LOGS_DIR", "logs")
 
 # === Terraform ===
 TERRAFORM_TIMEOUT = int(os.getenv("TERRAFORM_TIMEOUT", "300"))
+
+# === AWS MCP Configuration ===
+AWS_MCP_SERVER = os.getenv("AWS_MCP_SERVER", "awslabs-core-mcp-server")
+ENABLE_AWS_MCP = os.getenv("ENABLE_AWS_MCP", "False").lower() == "true"
 
 # === Security ===
 # Security validation is now handled in security_checker.py with provider-specific rules

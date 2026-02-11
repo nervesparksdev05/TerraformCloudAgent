@@ -1,393 +1,360 @@
-# 🚀 Terraform Cloud Agent - Multi-Cloud Infrastructure Automation
+# AWS EC2 & GCP Compute Terraform Agent
 
-An intelligent **LLM-powered Terraform agent** that converts natural language requests into production-ready infrastructure for **AWS** and **GCP**. Features async workflows, model fallback, MongoDB persistence, and full observability.
+An LLM-powered Terraform agent that generates secure, production-ready infrastructure code for **AWS EC2** and **GCP Compute Engine** instances with predefined IAM roles.
 
-## ✨ Key Features
+## 🎯 Overview
 
-- 🤖 **Natural Language to Infrastructure**: Describe what you want, get Terraform code
-- ☁️ **Multi-Cloud Support**: AWS (15 services) + GCP (15 services)
-- 🔄 **Interactive Workflow**: Plan → Review → Chat/Edit → Approve → Apply → Destroy
-- 🛡️ **Model Fallback**: OpenAI (primary) → Gemini (fallback) for 99.9% uptime
-- 💾 **MongoDB Persistence**: State management with automatic file fallback
-- 🔭 **Langfuse Observability**: Full LLM tracing and monitoring
-- 🔒 **Security First**: Built-in validation and policy enforcement
-- 📦 **Isolated Workspaces**: Each deployment runs in its own directory
-- 🎯 **RESTful API**: FastAPI with async background tasks
+This agent converts natural language requests into validated Terraform configurations, focusing exclusively on:
 
-## 🏗️ Architecture
+- **AWS EC2** - Complete EC2 instance management with networking and load balancing
+- **GCP Compute Engine** - Complete Compute instance management with networking and load balancing
+- **10 AWS IAM Role Types** - Predefined secure role patterns for common use cases
 
-See [Architecture Overview](./brain/architecture_overview.md) for detailed diagrams.
+## ✨ Features
 
-```
-User Request → FastAPI → RunManager → WorkflowEngine
-                            ↓              ↓
-                        MongoDB      LLMGenerator (OpenAI/Gemini)
-                                           ↓
-                                    SecurityChecker
-                                           ↓
-                                    TerraformRunner → AWS/GCP
-```
+- 🤖 **LLM-Powered Generation** - Natural language to Terraform using OpenAI/Gemini
+- 🔒 **Security-First** - Strict validation, no provisioners, least-privilege IAM
+- ☁️ **Multi-Cloud** - AWS EC2 and GCP Compute Engine support
+- 📦 **Complete Workflows** - `terraform init`, `plan`, `apply` automation
+- 🎭 **10 IAM Role Types** - Predefined secure patterns (S3, SSM, CloudWatch, Secrets Manager, etc.)
+- 📊 **Workspace Isolation** - Each run in isolated directory
+- 📝 **Comprehensive Logging** - Full execution logs and outputs
 
-**State Machine**: `CREATED` → `PLANNING` → `PLANNED` → `REVIEWING` → `APPROVED` → `APPLYING` → `COMPLETED` → `DESTROYING` → `DESTROYED`
-
-## 🚦 Quick Start
+## 🚀 Quick Start
 
 ### Prerequisites
 
-- Python 3.9+
-- Terraform CLI installed
-- MongoDB (optional, falls back to files)
-- OpenAI API key
-- AWS or GCP credentials
+- Python 3.11+
+- Terraform 1.0+
+- AWS CLI configured (for AWS deployments)
+- GCP SDK configured (for GCP deployments)
+- OpenAI API key or Google Gemini API key
 
 ### Installation
 
 ```bash
-# Clone repository
+# Clone the repository
+git clone <repository-url>
 cd TerraformCloudAgent
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure environment
-cp .env.example .env
-# Edit .env with your credentials
+# Set environment variables
+export OPENAI_API_KEY="your-openai-api-key"
+export AWS_REGION="us-east-1"
+export GCP_PROJECT_ID="your-gcp-project"
+export GCP_REGION="us-central1"
+
+# Start the server
+python -m app.main
 ```
 
-### Configuration
+The API will be available at `http://localhost:8000`
 
-Edit `.env`:
+## 📖 Usage
 
-```env
-# === OpenAI Configuration ===
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4
-OPENAI_TEMPERATURE=0.2
-
-# === Google Gemini (Fallback) ===
-GOOGLE_API_KEY=AIza...
-GEMINI_MODEL=gemini-1.5-pro
-
-# === Langfuse (Observability) ===
-LANGFUSE_PUBLIC_KEY=pk-lf-...
-LANGFUSE_SECRET_KEY=sk-lf-...
-LANGFUSE_HOST=https://cloud.langfuse.com
-
-# === MongoDB (Optional) ===
-MONGODB_URI=mongodb://localhost:27017/terraform_agent
-MONGODB_DATABASE=terraform_agent
-
-# === AWS Configuration ===
-DEFAULT_PROVIDER=aws
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
-
-# === GCP Configuration ===
-GCP_PROJECT_ID=my-project
-GCP_REGION=us-central1
-GCP_CREDENTIALS_PATH=path/to/service-account.json
-```
-
-### Run
-
-```bash
-# Start server
-uvicorn app.main_async:app --reload --port 8000
-
-# Or run directly
-python -m app.main_async
-```
-
-Server: `http://localhost:8000`  
-API Docs: `http://localhost:8000/docs`
-
-## 📖 API Usage
-
-### 1. Create a Run
+### AWS EC2 Example
 
 ```bash
 curl -X POST http://localhost:8000/runs \
   -H "Content-Type: application/json" \
   -d '{
-    "request": "Create a web server with HTTP access",
+    "request": "Create a web server on port 80 and 443 with CloudWatch logging",
     "provider": "aws"
   }'
 ```
 
-**Response (202 Accepted):**
+**Response**:
 ```json
 {
-  "run_id": "run_20260207_210000",
-  "status": "created",
+  "run_id": "run_20260209_125000_abc123",
+  "status": "ok",
   "provider": "aws",
-  "log_path": "runs/run_20260207_210000"
-}
-```
-
-### 2. Check Status
-
-```bash
-curl http://localhost:8000/runs/run_20260207_210000
-```
-
-**Response:**
-```json
-{
-  "run_id": "run_20260207_210000",
-  "status": "planned",
-  "provider": "aws",
-  "plan_output": "Terraform will perform the following actions...",
-  "cost_estimate": null
-}
-```
-
-### 3. Chat & Refine
-
-**Ask Questions:**
-```bash
-curl -X POST http://localhost:8000/runs/run_20260207_210000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What will this cost?"}'
-```
-
-**Request Changes (Refine Plan):**
-```bash
-curl -X POST http://localhost:8000/runs/run_20260207_210000/edit \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Change the instance type to t3.small"}'
-```
-
-**Response:**
-```json
-{
-  "run_id": "run_20260207_210000",
-  "status": "planning"
-}
-```
-
-Wait for status to return to `planned` to see updated resources.
-
-### 4. Approve & Deploy
-
-```bash
-curl -X POST http://localhost:8000/runs/run_20260207_210000/approve
-```
-
-**Response:**
-```json
-{
-  "run_id": "run_20260207_210000",
-  "status": "approved"
-}
-```
-
-Poll until `status` becomes `completed`:
-
-```json
-{
-  "run_id": "run_20260207_210000",
-  "status": "completed",
+  "log_path": "runs/run_20260209_125000_abc123",
   "outputs": {
-    "instance_id": "i-0123456789abcdef0",
-    "public_ip": "13.127.45.67"
+    "instance_id": "i-0123456789abcdef",
+    "public_ip": "54.123.45.67",
+    "iam_role_arn": "arn:aws:iam::123456789012:role/ec2-cloudwatch-logs"
   }
 }
 ```
 
-### 5. Destroy Infrastructure
+### GCP Compute Example
 
 ```bash
-curl -X POST http://localhost:8000/runs/run_20260207_210000/destroy
+curl -X POST http://localhost:8000/runs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request": "Create a VM instance with HTTP access",
+    "provider": "gcp"
+  }'
 ```
 
-**Response:**
+**Response**:
 ```json
 {
-  "run_id": "run_20260207_210000",
-  "status": "destroying"
+  "run_id": "run_20260209_125100_xyz789",
+  "status": "ok",
+  "provider": "gcp",
+  "log_path": "runs/run_20260209_125100_xyz789",
+  "outputs": {
+    "instance_id": "1234567890123456789",
+    "instance_ip": "35.123.45.67",
+    "service_account_email": "app-sa@project.iam.gserviceaccount.com"
+  }
 }
 ```
 
-Poll until `status` becomes `destroyed`.
+## 🔐 10 AWS IAM Role Types
 
-## 🌐 Multi-Cloud Support
+The agent supports 10 predefined IAM role patterns following AWS least-privilege principles:
 
-### AWS Services (Top 15)
-EC2, Lambda, ECS, S3, EBS, RDS, DynamoDB, VPC, Security Groups, Subnets, IGW, ALB, IAM, API Gateway, SQS
+| # | Role Type | Use Case | Example Request |
+|---|-----------|----------|-----------------|
+| 1 | **EC2 Basic** | Minimal EC2 permissions | "Create EC2 with basic permissions" |
+| 2 | **EC2 S3 Access** | Read/write to S3 buckets | "Create EC2 that can access S3" |
+| 3 | **EC2 SSM Managed** | Systems Manager access | "Create EC2 with SSM access" |
+| 4 | **EC2 CloudWatch Logs** | Write logs to CloudWatch | "Create EC2 that writes logs" |
+| 5 | **EC2 Secrets Manager** | Read secrets | "Create EC2 that reads secrets" |
+| 6 | **Lambda Execution** | Lambda for EC2 automation | "Create Lambda execution role" |
+| 7 | **Cross-Account Access** | Assume role from another account | "Create cross-account role" |
+| 8 | **EC2 ECR** | Pull Docker images from ECR | "Create EC2 with ECR access" |
+| 9 | **EC2 DynamoDB** | DynamoDB read/write | "Create EC2 with DynamoDB access" |
+| 10 | **EC2 RDS** | RDS IAM authentication | "Create EC2 with RDS access" |
 
-### GCP Services (Top 15)
-Compute Engine, Cloud Functions, Cloud Run, Cloud Storage, Persistent Disk, Cloud SQL, Firestore, VPC, Firewall Rules, Subnets, Load Balancer, IAM, Pub/Sub, Cloud Scheduler
+📚 **[View detailed IAM role documentation →](docs/IAM_ROLES.md)**
 
-### Example Requests
+## 🛠️ Supported Resources
 
-**AWS Web Server:**
-```json
-{"request": "Create an EC2 web server with nginx", "provider": "aws"}
-```
+### AWS Resources
 
-**GCP Database:**
-```json
-{"request": "Deploy a Cloud SQL MySQL instance", "provider": "gcp"}
-```
+**EC2 Compute**:
+- `aws_instance`, `aws_key_pair`, `aws_eip`, `aws_eip_association`
+- `aws_launch_template`, `aws_autoscaling_group`, `aws_autoscaling_policy`
 
-**AWS Lambda:**
-```json
-{"request": "Create a Lambda function for image processing", "provider": "aws"}
-```
+**Networking**:
+- `aws_vpc`, `aws_subnet`, `aws_route_table`, `aws_internet_gateway`, `aws_nat_gateway`
+- `aws_security_group`, `aws_security_group_rule`
 
-## 🔒 Security Features
+**Load Balancing**:
+- `aws_lb`, `aws_lb_listener`, `aws_lb_target_group`, `aws_lb_target_group_attachment`
 
-### Validation Layers
-1. **Pydantic Schemas**: Request validation
-2. **LLM Prompt Engineering**: Constrained generation
-3. **SecurityChecker**: Policy enforcement
-4. **Terraform Plan**: Pre-deployment review
+**IAM**:
+- `aws_iam_role`, `aws_iam_policy`, `aws_iam_role_policy_attachment`, `aws_iam_instance_profile`
 
-### Prohibited Patterns
-- ❌ Provisioners (local-exec, remote-exec)
-- ❌ Hardcoded credentials
-- ❌ Non-approved resources
-- ❌ External data sources
+### GCP Resources
 
-## 🔭 Observability
+**Compute Engine**:
+- `google_compute_instance`, `google_compute_instance_template`
+- `google_compute_instance_group`, `google_compute_instance_group_manager`
+- `google_compute_disk`, `google_compute_autoscaler`
 
-### Langfuse Integration
-- Traces all LLM calls (OpenAI + Gemini)
-- Captures prompts, completions, errors
-- Links traces to `run_id`
-- Tracks model fallback events
+**Networking**:
+- `google_compute_network`, `google_compute_subnetwork`, `google_compute_firewall`
+- `google_compute_router`, `google_compute_router_nat`, `google_compute_address`
 
-**Setup**: Add Langfuse keys to `.env` (see Configuration section)
+**Load Balancing**:
+- `google_compute_backend_service`, `google_compute_url_map`
+- `google_compute_target_http_proxy`, `google_compute_forwarding_rule`, `google_compute_health_check`
 
-### Logs
-- Application logs: `logs/app_YYYYMMDD.log`
-- Terraform logs: `runs/<run_id>/terraform.log`
+**IAM**:
+- `google_service_account`, `google_project_iam_member`, `google_compute_instance_iam_member`
 
-## 💾 State Management
+## 🔒 Security Constraints
 
-### MongoDB (Primary)
-- Stores run state and chat history
-- Indexed for performance
-- Supports queries and analytics
+### Prohibited (Will Reject)
+- ❌ Provisioners (`local-exec`, `remote-exec`, `file`)
+- ❌ `null_resource` or `external` data sources
+- ❌ Hardcoded credentials (AWS keys, passwords, secrets)
+- ❌ Unsupported services (Lambda, S3, RDS, DynamoDB, Cloud Functions, Cloud Storage, etc.)
 
-### File Fallback
-- Automatic fallback if MongoDB unavailable
-- Stored in `runs/<run_id>/state.json`
-- Dual persistence for reliability
+### Required Security Practices
+- ✅ Variables for all sensitive data
+- ✅ Least-privilege IAM policies
+- ✅ Restrictive security groups (never 0.0.0.0/0 for SSH)
+- ✅ One of the 10 predefined IAM role types (AWS)
+- ✅ Encryption in transit (SSL/TLS)
 
 ## 📁 Project Structure
 
 ```
 TerraformCloudAgent/
 ├── app/
-│   ├── core/
-│   │   ├── config.py           # Environment configuration
-│   │   ├── database.py         # MongoDB service
-│   │   └── logger.py           # Logging setup
-│   ├── models/
-│   │   └── schemas.py          # Pydantic models
-│   ├── services/
-│   │   ├── llm_generator.py    # OpenAI/Gemini integration
-│   │   ├── security_checker.py # Policy validation
-│   │   ├── run_manager.py      # State management
-│   │   ├── workflow_engine.py  # Orchestration
-│   │   └── terraform_runner.py # Terraform execution
-│   ├── prompts/
+│   ├── core/              # Configuration, logging, database
+│   ├── models/            # Pydantic schemas
+│   ├── prompts/           # LLM system prompts
 │   │   ├── aws_focused_system_prompt.txt
 │   │   └── gcp_focused_system_prompt.txt
-│   └── main_async.py           # FastAPI application
-├── runs/                       # Workspace directories
-├── logs/                       # Application logs
-├── .env                        # Environment variables
-└── requirements.txt
+│   ├── services/          # Business logic
+│   │   ├── llm_generator.py        # OpenAI/Gemini integration
+│   │   ├── security_checker.py     # Security validation
+│   │   ├── terraform_runner.py     # Terraform execution
+│   │   └── workspace_manager.py    # Workspace isolation
+│   └── main.py            # FastAPI application
+├── docs/
+│   └── IAM_ROLES.md       # IAM role documentation
+├── runs/                  # Isolated run workspaces
+├── logs/                  # Application logs
+└── requirements.txt       # Python dependencies
 ```
 
-## 🚀 Production Readiness
+## 🌐 API Reference
 
-### ✅ Ready
-- Multi-cloud support (AWS + GCP)
-- Model fallback (OpenAI → Gemini)
-- MongoDB persistence with file fallback
-- Langfuse observability
-- Security validation
-- Infrastructure lifecycle (create + destroy)
+### POST /runs
 
-### ⚠️ Needs Attention
-- **Authentication**: No API key/OAuth (critical)
-- **Rate Limiting**: No DDoS protection
-- **HTTPS**: Traffic unencrypted
-- **Worker Isolation**: Move to Celery + Redis
+Create and execute a Terraform run.
 
-See [Production Readiness Assessment](./brain/production_readiness.md) for details.
+**Request Body**:
+```json
+{
+  "request": "Natural language infrastructure request",
+  "provider": "aws" | "gcp",
+  "auto_approve": false
+}
+```
 
-## 🛠️ Development
+**Response**:
+```json
+{
+  "run_id": "run_20260209_125000_abc123",
+  "status": "ok" | "error",
+  "provider": "aws" | "gcp",
+  "log_path": "runs/run_20260209_125000_abc123",
+  "outputs": {
+    "instance_id": "...",
+    "public_ip": "..."
+  },
+  "error": "Error message (if status is error)"
+}
+```
 
-### API Documentation
-Visit `http://localhost:8000/docs` for interactive Swagger UI.
+## 📊 Example Requests
 
-### Running Tests
+### AWS Examples
+
 ```bash
-# Unit tests
-pytest tests/
+# Simple web server
+"Create a web server on port 80 and 443"
 
-# Integration tests
-pytest tests/integration/
+# Web server with IAM role
+"Create an EC2 instance that can write logs to CloudWatch"
+
+# Auto-scaling web application
+"Create auto-scaling web servers with load balancer"
+
+# Bastion host
+"Create a bastion host with SSM access"
+
+# Container host
+"Create EC2 instance for Docker containers with ECR access"
 ```
 
-### Docker Deployment
+### GCP Examples
+
 ```bash
-# Build image
-docker build -t terraform-agent .
+# Simple VM
+"Create a VM instance with HTTP access"
 
-# Run with docker-compose
-docker-compose up -d
+# Multi-instance deployment
+"Deploy 3 web servers with load balancer"
+
+# Auto-scaling application
+"Create auto-scaling Compute instances"
+
+# Private instance
+"Create instance in private subnet with Cloud NAT"
 ```
 
-## 📚 Documentation
+## 🧪 Testing
 
-- [Architecture Overview](./brain/architecture_overview.md) - System design and flow diagrams
-- [Implementation Plan](./brain/implementation_plan.md) - Technical implementation details
-- [Production Readiness](./brain/production_readiness.md) - Deployment checklist
-- [MongoDB Integration](./brain/mongodb_integration.md) - Database setup guide
-- [Destroy Implementation](./brain/destroy_implementation.md) - Infrastructure cleanup
+### Manual Testing
 
-## 🎯 Roadmap
+```bash
+# Test AWS EC2 creation
+curl -X POST http://localhost:8000/runs \
+  -H "Content-Type: application/json" \
+  -d '{"request": "Create a web server", "provider": "aws"}'
 
-- [x] Multi-cloud support (AWS + GCP)
-- [x] Interactive workflow (plan → review → approve)
-- [x] Model fallback (OpenAI → Gemini)
-- [x] MongoDB persistence
-- [x] Langfuse observability
-- [x] Terraform destroy
-- [ ] Cost estimation (Infracost)
-- [ ] Authentication & rate limiting
-- [ ] WebSocket logs
-- [ ] Frontend UI (React/Next.js)
+# Test GCP Compute creation
+curl -X POST http://localhost:8000/runs \
+  -H "Content-Type: application/json" \
+  -d '{"request": "Create a VM instance", "provider": "gcp"}'
+
+# Verify generated files
+cd runs/<run_id>
+cat main.tf
+cat variables.tf
+cat outputs.tf
+```
+
+### Automated Tests
+
+```bash
+# Run security checker tests
+python -m pytest tests/test_security_checker.py -v
+
+# Run LLM generator tests
+python -m pytest tests/test_llm_generator.py -v
+```
+
+## ⚙️ Configuration
+
+### Environment Variables
+
+```bash
+# Required
+OPENAI_API_KEY=sk-...                    # OpenAI API key
+AWS_REGION=us-east-1                     # AWS region
+GCP_PROJECT_ID=my-project                # GCP project ID
+GCP_REGION=us-central1                   # GCP region
+
+# Optional
+HOST=0.0.0.0                             # Server host (default: 0.0.0.0)
+PORT=8000                                # Server port (default: 8000)
+DEBUG=false                              # Debug mode (default: false)
+WORKSPACE_BASE_DIR=./runs                # Workspace directory (default: ./runs)
+LOGS_DIR=./logs                          # Logs directory (default: ./logs)
+```
+
+## 🐛 Troubleshooting
+
+### Common Issues
+
+**"Resource type not allowed" error**:
+- The agent only supports EC2/Compute resources
+- Check that you're not requesting Lambda, S3, RDS, Cloud Functions, Cloud Storage, etc.
+
+**"Security validation failed" error**:
+- Review the security constraints
+- Ensure no hardcoded credentials
+- Check that IAM policies follow least-privilege
+
+**"Terraform execution failed" error**:
+- Check AWS/GCP credentials are configured
+- Verify Terraform is installed and in PATH
+- Review the run logs in `runs/<run_id>/terraform.log`
+
+## 📝 License
+
+MIT License - see LICENSE file for details
 
 ## 🤝 Contributing
 
-Contributions welcome! Please ensure:
-- Code follows existing patterns
-- Security validations are maintained
-- Tests pass
-- Documentation updated
+Contributions are welcome! Please follow these guidelines:
 
-## 📄 License
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests for new functionality
+5. Submit a pull request
 
-## 🆘 Support
+## 📞 Support
 
-For issues:
-1. Check logs in `logs/` directory
-2. Review Terraform logs in workspace
-3. Verify credentials in `.env`
-4. Ensure Terraform CLI is installed
-5. Check MongoDB connection (if used)
+For issues, questions, or feature requests, please open an issue on GitHub.
 
----
+## 🙏 Acknowledgments
 
-**Built with ❤️ By NerveSparks**
+- Built with [FastAPI](https://fastapi.tiangolo.com/)
+- LLM integration via [OpenAI](https://openai.com/) and [Google Gemini](https://ai.google.dev/)
+- Infrastructure as Code with [Terraform](https://www.terraform.io/)

@@ -1,17 +1,31 @@
-# FastAPI and Web Framework
+# requirements.txt
+
+# Core Framework (Required)
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
 pydantic==2.9.2
 pydantic-settings==2.6.1
+numpy==1.26.4
 
-# OpenAI
+# LLM Providers (Required)
 openai==1.54.0
+google-generativeai==0.8.3
 
-# Environment Management
+# Utilities (Required)
 python-dotenv==1.0.1
-
-# HTTP Client (for testing)
 httpx==0.27.2
-
-# Utilities
 python-multipart==0.0.12
+requests==2.31.0
+
+# AWS SDK (Required for real AWS MCP)
+boto3==1.35.36
+botocore==1.35.36
+
+# Conversational & Frontend
+streamlit==1.31.0
+streamlit-chat==0.1.1
+
+# Optional: Uncomment if needed (these cause dependency conflicts)
+# langfuse==3.13.0                 # LLM monitoring (conflicts with google packages)
+# google-cloud-storage==2.18.2     # GCP SDK (conflicts with google-generativeai)
+

@@ -1,7 +1,6 @@
-"""
-Pydantic models for request/response validation
-"""
-from typing import Optional, Dict, Any, Literal
+"""Pydantic schemas for API request/response validation"""
+from datetime import datetime
+from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 
@@ -23,23 +22,21 @@ class RunStatus(str, Enum):
 
 class AgentRequest(BaseModel):
     """User request for infrastructure deployment"""
-    request: str = Field(
+    request: Union[str, Dict[str, Any]] = Field(
         ...,
-        description="Natural language description of desired infrastructure",
-        min_length=10,
-        max_length=500
+        description="Natural language description OR structured parameters dict",
     )
-    
+
     provider: Literal["aws", "gcp"] = Field(
         default="aws",
         description="Cloud provider (aws or gcp)"
     )
-    
+
     auto_approve: bool = Field(
         default=False,
         description="Auto-approve terraform apply (use with caution)"
     )
-    
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -55,7 +52,7 @@ class TerraformBundle(BaseModel):
     main_tf: str = Field(..., description="Main Terraform configuration (main.tf)")
     variables_tf: str = Field(..., description="Variables definition (variables.tf)")
     outputs_tf: str = Field(..., description="Outputs definition (outputs.tf)")
-    
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -72,11 +69,11 @@ class RunResponse(BaseModel):
     status: RunStatus = Field(..., description="Current status of the run")
     provider: str = Field(..., description="Cloud provider used: 'aws' or 'gcp'")
     log_path: str = Field(..., description="Path to run logs and workspace")
-    
+
     # Optional fields populated as run progresses
     plan_output: Optional[str] = Field(None, description="Terraform plan output")
     cost_estimate: Optional[Dict[str, Any]] = Field(None, description="Cost estimation details")
-    
+
     outputs: Optional[Dict[str, Any]] = Field(
         None,
         description="Terraform outputs (only present on success)"
@@ -85,7 +82,12 @@ class RunResponse(BaseModel):
         None,
         description="Error message (only present on failure)"
     )
-    
+
+    metadata: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Additional metadata for the run (e.g. conversation parameters)"
+    )
+
     class Config:
         use_enum_values = True
         json_schema_extra = {
@@ -109,5 +111,3 @@ class ChatResponse(BaseModel):
     """Chatbot response"""
     response: str = Field(..., description="Assistant's reply")
     timestamp: str = Field(..., description="Timestamp of response")
-
-
