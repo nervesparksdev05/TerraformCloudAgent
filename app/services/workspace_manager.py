@@ -95,6 +95,8 @@ class WorkspaceManager:
         request_file = workspace_path / "request.json"
         request_data = {
             "request": request.request,
+            "provider": request.provider,
+            "auto_approve": request.auto_approve,
             "timestamp": datetime.now().isoformat()
         }
         request_file.write_text(json.dumps(request_data, indent=2), encoding="utf-8")

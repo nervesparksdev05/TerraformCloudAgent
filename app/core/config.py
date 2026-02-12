@@ -35,7 +35,7 @@ if not GOOGLE_API_KEY:
     # Log warning instead of error since it's a fallback
     print("WARNING: GOOGLE_API_KEY not set. Fallback to Gemini will not work.")
 
-valid_providers = ["aws", "gcp"]
+valid_providers = ["aws", "gcp", "azure", "digitalocean"]
 if DEFAULT_PROVIDER not in valid_providers:
     raise ValueError(f"Invalid DEFAULT_PROVIDER: {DEFAULT_PROVIDER}. Must be one of {valid_providers}")
 
@@ -59,7 +59,9 @@ DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 # === App Metadata ===
 APP_NAME = "Multi-Cloud Terraform Agent"
 APP_VERSION = "2.0.0"
-APP_DESCRIPTION = "LLM-powered Terraform agent for AWS and GCP (Top 15 services)"
+APP_DESCRIPTION = (
+    "LLM-powered Terraform agent for AWS, GCP, Azure, and DigitalOcean"
+)
 
 # === Directories ===
 BASE_DIR = Path(__file__).parent.parent.parent

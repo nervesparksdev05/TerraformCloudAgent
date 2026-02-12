@@ -67,6 +67,32 @@ def start_new_conversation() -> None:
         st.error(f"Failed to start conversation: {exc}")
 
 
+def load_session(session_id: str) -> None:
+    """Load a past session into state."""
+    try:
+        with st.spinner("Loading session..."):
+            session_data = api_client.get_conversation(session_id)
+        
+        st.session_state.session_id = session_id
+        # Restore messages
+        messages = session_data.get("messages", [])
+        # Filter for UI-relevant messages only (user/assistant)
+        st.session_state.messages = [
+            m for m in messages if m.get("role") in ("user", "assistant")
+        ]
+        
+        st.session_state.collected_parameters = session_data.get("collected_parameters", {})
+        st.session_state.conversation_complete = session_data.get("is_complete", False)
+        
+        # Restore run_id if available (take the last one if multiple)
+        run_ids = session_data.get("run_ids", [])
+        st.session_state.run_id = run_ids[-1] if run_ids else None
+        
+    except Exception as exc:
+        st.error(f"Failed to reload session: {exc}")
+
+
+
 def send_user_message(user_message: str) -> None:
     if not st.session_state.session_id:
         st.error("Start a conversation first.")
@@ -136,21 +162,85 @@ def render_sidebar() -> None:
         st.markdown("</div>", unsafe_allow_html=True)
         st.write("")
 
+        # New Chat Button
+        if st.button("➕ New Chat", use_container_width=True, type="primary"):
+            start_new_conversation()
+            st.rerun()
+
+        st.divider()
+
+        # Session History
+        st.markdown("### Recent Chats")
+        sessions = api_client.get_sessions(limit=10)
+        
+        # Workload type icons
+        workload_icons = {
+            "web_server": "🌐",
+            "api": "🔌",
+            "app_server": "📱",
+            "database": "🗄️",
+            "batch": "⚙️",
+            "custom": "🔧"
+        }
+        
+        for sess in sessions:
+            title = sess.get("title", "New Conversation")
+            sid = sess.get("session_id")
+            workload_type = sess.get("workload_type", "")
+            
+            # Get icon for workload type
+            icon = workload_icons.get(workload_type, "💬")
+            
+            # Highlight current session
+            is_active = (sid == st.session_state.session_id)
+            
+            # Create columns for icon, session button, and delete button
+            col1, col2, col3 = st.columns([0.5, 5, 0.5])
+            
+            with col1:
+                st.markdown(f"<div style='font-size: 1.2em; padding-top: 4px;'>{icon}</div>", unsafe_allow_html=True)
+            
+            with col2:
+                button_type = "primary" if is_active else "secondary"
+                if st.button(
+                    title, 
+                    key=f"btn_{sid}", 
+                    use_container_width=True,
+                    type=button_type,
+                    help=f"Session ID: {sid[:12]}..."
+                ):
+                    if not is_active:
+                        load_session(sid)
+                        st.rerun()
+            
+            with col3:
+                if st.button("🗑️", key=f"del_{sid}", help="Delete session"):
+                    try:
+                        api_client.delete_session(sid)
+                        # If deleting active session, clear state
+                        if is_active:
+                            st.session_state.session_id = None
+                            st.session_state.messages = []
+                            st.session_state.conversation_complete = False
+                            st.session_state.collected_parameters = {}
+                            st.session_state.run_id = None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to delete: {e}")
+
+        if not sessions:
+            st.caption("No history yet.")
+
+        st.divider()
+
         if st.session_state.session_id:
-            st.success("Conversation active")
-            st.caption(f"Session: {st.session_state.session_id[:12]}...")
+            st.caption(f"Active: {st.session_state.session_id[:8]}...")
             if st.session_state.conversation_complete:
-                st.success("Parameters complete")
+                st.success("✅ Parameters Complete")
             else:
-                st.info("Collecting parameters")
-            if st.button("New Conversation", use_container_width=True):
-                start_new_conversation()
-                st.rerun()
+                st.info("✍️ Collecting Params")
         else:
             st.warning("No active conversation")
-            if st.button("Start Conversation", type="primary", use_container_width=True):
-                start_new_conversation()
-                st.rerun()
 
         if st.session_state.collected_parameters:
             with st.expander("Collected Parameters", expanded=False):

@@ -1,6 +1,6 @@
 # Terraform Agent - Streamlit Frontend
 
-A conversational interface for deploying AWS infrastructure with Terraform.
+A conversational interface for deploying multi-cloud infrastructure with Terraform (AWS, GCP, Azure, DigitalOcean).
 
 ## Features
 
@@ -34,11 +34,12 @@ Click "Start Conversation" in the sidebar to begin.
 ### 2. Chat with the Bot
 
 Answer the bot's questions about your infrastructure needs:
-- Workload type (web server, API, database, etc.)
-- Instance configuration (count, type, region)
-- Network and security settings (ports, security groups)
-- IAM permissions (custom roles based on your needs)
-- Additional features (monitoring, auto-scaling, etc.)
+- Stage 1: workload type, workload description, cloud provider, region, environment
+- Stage 2: instance count, instance type, operating system
+- Stage 3: storage size and storage type
+- Stage 4: ports, SSH CIDRs, load balancer type
+- Stage 5: IAM services/actions and IAM role name
+- Stage 6: monitoring, detailed monitoring, autoscaling, backups, log retention
 
 ### 3. Generate Terraform
 

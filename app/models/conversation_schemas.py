@@ -22,6 +22,7 @@ class ConversationSession(BaseModel):
     collected_parameters: Dict[str, Any] = Field(default_factory=dict)
     is_complete: bool = Field(default=False)
     status: ConversationStatus = Field(default=ConversationStatus.ACTIVE)
+    run_ids: List[str] = Field(default_factory=list, description="List of run IDs generated from this session")
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 

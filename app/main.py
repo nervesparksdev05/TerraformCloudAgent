@@ -186,6 +186,31 @@ async def get_conversation(session_id: str):
     return session.dict()
 
 
+@app.get("/sessions")
+async def list_sessions(limit: int = 20):
+    """List recent conversation sessions for the sidebar history."""
+    try:
+        sessions = conversation_manager.list_sessions(limit=limit)
+        return sessions
+    except Exception as e:
+        logger.error(f"Failed to list sessions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a conversation session."""
+    try:
+        success = conversation_manager.delete_session(session_id)
+        if success:
+            return {"message": "Session deleted successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="Session not found")
+    except Exception as e:
+        logger.error(f"Failed to delete session {session_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/conversations/{session_id}/generate", response_model=RunResponse, status_code=202)
 async def generate_terraform_from_conversation(
     session_id: str,
@@ -240,6 +265,9 @@ async def generate_terraform_from_conversation(
             "session_id": session_id,
         }
         run_manager.save_run_state(run.run_id, run)
+        
+        # Link run to session
+        conversation_manager.add_run_to_session(session_id, run.run_id)
 
         logger.info(f"[{session_id}] Creating run {run.run_id} from conversation")
 

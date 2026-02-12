@@ -349,6 +349,25 @@ CRITICAL RULES
     def _build_prompt(self, params: Dict[str, Any], provider: str) -> str:
         """Build a rich, structured prompt from ALL conversation parameters."""
         p = params  # shorthand
+        provider_norm = (p.get("cloud_provider") or provider or "aws").lower()
+        provider_display = {
+            "aws": "AWS EC2",
+            "gcp": "GCP Compute Engine",
+            "azure": "Azure Virtual Machines",
+            "digitalocean": "DigitalOcean Droplets",
+        }.get(provider_norm, "AWS EC2")
+        default_region = {
+            "aws": "us-east-1",
+            "gcp": "us-central1",
+            "azure": "eastus",
+            "digitalocean": "nyc1",
+        }.get(provider_norm, "us-east-1")
+        default_instance = {
+            "aws": "t3.micro",
+            "gcp": "e2-micro",
+            "azure": "B1s",
+            "digitalocean": "basic-1vCPU-1GB",
+        }.get(provider_norm, "t3.micro")
 
         # Format ports for readability
         ports_desc = ""
@@ -385,19 +404,19 @@ CRITICAL RULES
         ports_section = ports_desc if ports_desc else default_ports
         iam_section = iam_desc if iam_desc else default_iam
 
-        prompt = f"""Generate production-grade AWS EC2 Terraform configuration.
+        prompt = f"""Generate production-grade Terraform configuration for {provider_display}.
 
 WORKLOAD: {p.get('workload_description', p.get('service_type', 'web server'))}
 ENVIRONMENT: {p.get('environment', 'dev')}
 
 COMPUTE:
-  Instance type: {p.get('instance_type', 't3.micro')}
+  Instance type: {p.get('instance_type', default_instance)}
   Instance count: {p.get('instance_count', 1)}
-  Region: {p.get('region', 'us-east-1')}
+  Region: {p.get('region', default_region)}
   OS: {p.get('os_image', 'ubuntu-22.04')} (use data "aws_ami" to find latest)
 
 STORAGE:
-  Root volume: {p.get('storage_size', 20)} GB {p.get('storage_type', 'gp3')}
+  Root volume: {p.get('storage_size_gb', p.get('storage_size', 20))} GB {p.get('storage_type', 'gp3')}
   Encrypted: true (always)
 
 NETWORKING:

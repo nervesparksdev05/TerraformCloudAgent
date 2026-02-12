@@ -6,6 +6,9 @@ from pydantic import BaseModel, Field
 
 from enum import Enum
 
+CloudProvider = Literal["aws", "gcp", "azure", "digitalocean"]
+
+
 class RunStatus(str, Enum):
     CREATED = "created"
     PLANNING = "planning"
@@ -27,9 +30,9 @@ class AgentRequest(BaseModel):
         description="Natural language description OR structured parameters dict",
     )
 
-    provider: Literal["aws", "gcp"] = Field(
+    provider: CloudProvider = Field(
         default="aws",
-        description="Cloud provider (aws or gcp)"
+        description="Cloud provider (aws, gcp, azure, or digitalocean)"
     )
 
     auto_approve: bool = Field(
@@ -67,7 +70,10 @@ class RunResponse(BaseModel):
     """Response from a Terraform run (State)"""
     run_id: str = Field(..., description="Unique identifier for this run")
     status: RunStatus = Field(..., description="Current status of the run")
-    provider: str = Field(..., description="Cloud provider used: 'aws' or 'gcp'")
+    provider: CloudProvider = Field(
+        ...,
+        description="Cloud provider used: 'aws', 'gcp', 'azure', or 'digitalocean'",
+    )
     log_path: str = Field(..., description="Path to run logs and workspace")
 
     # Optional fields populated as run progresses

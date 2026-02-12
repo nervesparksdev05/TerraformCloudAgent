@@ -63,6 +63,8 @@ You are a friendly, warm cloud infrastructure expert — like a helpful senior D
 5. Check [Collected so far: {...}] every turn — skip stages where you have all params.
 6. NEVER accept 0.0.0.0/0 for SSH. Explain the risk, suggest their IP/32 or VPN CIDR.
 7. Use cloud-specific terms consistently throughout the conversation.
+8. CRITICAL: Your "message" MUST always end with a question for the next step, unless "is_complete": true.
+9. If you have collected all parameters for the current stage, increment `current_stage` in your response.
 
 ═══════════════════════════════════════════════════════════════
 CONVERSATION STAGES (work through IN ORDER, skip what you have)
@@ -338,6 +340,24 @@ EDGE CASES
             raise ValueError("OPENAI_API_KEY not configured")
         self.sessions: Dict[str, ConversationSession] = {}
         self.openai_client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+        
+        # MongoDB connection for session persistence
+        try:
+            from pymongo import MongoClient
+            mongo_uri = config.MONGODB_URI
+            mongo_db = config.MONGODB_DATABASE
+            if mongo_uri and mongo_db:
+                client = MongoClient(mongo_uri)
+                db = client[mongo_db]
+                self.sessions_collection = db["sessions"]
+                logger.info("ConversationManager initialized with MongoDB persistence")
+            else:
+                self.sessions_collection = None
+                logger.warning("MongoDB not configured - sessions will not persist")
+        except Exception as e:
+            logger.error(f"Failed to connect to MongoDB: {e}")
+            self.sessions_collection = None
+        
         logger.info("ConversationManager initialised")
 
     # ================================================================
@@ -354,6 +374,14 @@ EDGE CASES
             is_complete=False,
             status=ConversationStatus.ACTIVE,
         )
+        
+        # Persist to MongoDB
+        if self.sessions_collection:
+            try:
+                self.sessions_collection.insert_one(self.sessions[sid].dict())
+            except Exception as e:
+                logger.error(f"Failed to persist session {sid}: {e}")
+                
         logger.info("Created session: %s", sid)
         return {
             "session_id": sid,
@@ -425,6 +453,12 @@ EDGE CASES
         if session.is_complete:
             self._apply_defaults(session.collected_parameters)
             session.status = ConversationStatus.COMPLETE
+            
+            # Inject cost calculation into the message
+            cost_breakdown = self._calculate_cost(session.collected_parameters)
+            if cost_breakdown and "💰" not in data["message"]:
+                data["message"] = cost_breakdown + data["message"]
+            
             logger.info(
                 "[%s] Complete – %d params",
                 session_id,
@@ -434,6 +468,24 @@ EDGE CASES
         session.messages.append(
             {"role": "assistant", "content": data["message"]}
         )
+        
+        # Update MongoDB
+        if self.sessions_collection:
+            try:
+                self.sessions_collection.update_one(
+                    {"session_id": session_id},
+                    {
+                        "$set": {
+                            "messages": session.messages,
+                            "collected_parameters": session.collected_parameters,
+                            "is_complete": session.is_complete,
+                            "status": session.status,
+                            "updated_at": session.updated_at
+                        }
+                    }
+                )
+            except Exception as e:
+                logger.error(f"Failed to update session {session_id}: {e}")
 
         return ChatMessageResponse(
             session_id=session_id,
@@ -624,3 +676,169 @@ EDGE CASES
     def is_session_complete(self, session_id: str) -> bool:
         session = self.get_session(session_id)
         return session.is_complete if session else False
+
+    # ================================================================
+    # COST CALCULATION
+    # ================================================================
+
+    def _calculate_cost(self, params: dict) -> str:
+        """Calculate estimated monthly cost and return formatted string."""
+        try:
+            instance_count = params.get("instance_count", 1)
+            instance_type = params.get("instance_type", "t3.micro")
+            storage_size = params.get("storage_size_gb", 20)
+            storage_type = params.get("storage_type", "gp3")
+            lb_type = params.get("load_balancer_type", "none")
+            
+            # AWS pricing (simplified)
+            instance_prices = {
+                "t3.micro": 0.0104, "t3.small": 0.0208, "t3.medium": 0.0416,
+                "t3.large": 0.0832, "t3.xlarge": 0.1664,
+                "t2.micro": 0.0116, "t2.small": 0.023, "t2.medium": 0.0464,
+            }
+            storage_prices = {"gp3": 0.08, "gp2": 0.10, "io2": 0.125}
+            lb_prices = {"application": 16.20, "network": 22.00, "none": 0.00}
+            
+            hourly_rate = instance_prices.get(instance_type, 0.02)
+            storage_rate = storage_prices.get(storage_type, 0.08)
+            lb_cost = lb_prices.get(lb_type, 0.00)
+            
+            compute_cost = instance_count * hourly_rate * 730
+            storage_cost = storage_size * storage_rate
+            total_cost = compute_cost + storage_cost + lb_cost
+            
+            cost_breakdown = f"""
+💰 **Estimated Monthly Cost: ${total_cost:.2f}**
+
+**Breakdown:**
+• Compute: {instance_count} × {instance_type} × 730 hrs = **${compute_cost:.2f}**
+• Storage: {storage_size} GB {storage_type} = **${storage_cost:.2f}**
+• Load Balancer: **${lb_cost:.2f}**
+
+**Total: ~${total_cost:.2f}/month**
+
+*Actual costs may vary based on usage, region, and data transfer.*
+
+---
+
+"""
+            return cost_breakdown
+        except Exception as e:
+            logger.error(f"Cost calculation failed: {e}")
+            return ""
+
+    # ================================================================
+    # SESSION LISTING & DELETION
+    # ================================================================
+
+    def list_sessions(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """List recent sessions for the sidebar history."""
+        if not self.sessions_collection:
+            # Fallback to in-memory sessions
+            sessions_list = []
+            for sid, session in list(self.sessions.items())[:limit]:
+                title = "New Conversation"
+                if session.messages:
+                    for msg in session.messages:
+                        if msg.get("role") == "user":
+                            content = msg.get("content", "")
+                            title = (content[:30] + "...") if len(content) > 30 else content
+                            break
+                
+                sessions_list.append({
+                    "session_id": sid,
+                    "title": title,
+                    "workload_type": session.collected_parameters.get("workload_type", ""),
+                    "provider": session.provider,
+                    "updated_at": datetime.now().isoformat(),
+                    "created_at": datetime.now().isoformat()
+                })
+            return sessions_list
+        
+        try:
+            cursor = self.sessions_collection.find(
+                {}, 
+                {"session_id": 1, "messages": 1, "collected_parameters": 1, "provider": 1, "updated_at": 1, "created_at": 1}
+            ).sort("updated_at", -1).limit(limit)
+            
+            sessions = []
+            for doc in cursor:
+                params = doc.get("collected_parameters", {})
+                created = doc.get("created_at")
+                
+                # Build descriptive title
+                workload = params.get("workload_description", "")
+                workload_type = params.get("workload_type", "")
+                provider = params.get("cloud_provider") or doc.get("provider", "")
+                
+                if workload:
+                    title = workload[:40] + "..." if len(workload) > 40 else workload
+                elif workload_type:
+                    title = workload_type.replace("_", " ").title()
+                else:
+                    messages = doc.get("messages", [])
+                    for msg in messages:
+                        if msg.get("role") == "user":
+                            content = msg.get("content", "")
+                            title = (content[:30] + "...") if len(content) > 30 else content
+                            break
+                    else:
+                        title = "New Conversation"
+                
+                if provider:
+                    title = f"{title} ({provider.upper()})"
+                
+                if created:
+                    date_str = created.strftime("%b %d")
+                    title = f"{title} - {date_str}"
+                
+                sessions.append({
+                    "session_id": doc["session_id"],
+                    "title": title,
+                    "updated_at": doc.get("updated_at", doc.get("created_at")).isoformat(),
+                    "created_at": doc.get("created_at").isoformat(),
+                    "workload_type": workload_type,
+                    "provider": provider
+                })
+            return sessions
+        except Exception as e:
+            logger.error(f"Failed to list sessions: {e}")
+            return []
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a session from storage."""
+        # Remove from in-memory
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+        
+        # Remove from MongoDB if available
+        if self.sessions_collection:
+            try:
+                result = self.sessions_collection.delete_one({"session_id": session_id})
+                return result.deleted_count > 0
+            except Exception as e:
+                logger.error(f"Failed to delete session {session_id}: {e}")
+                return False
+        return True
+
+    def add_run_to_session(self, session_id: str, run_id: str) -> None:
+        """Link a run ID to a session."""
+        session = self.get_session(session_id)
+        if session:
+            if not hasattr(session, "run_ids"):
+                session.run_ids = []
+            session.run_ids.append(run_id)
+            session.updated_at = datetime.now()
+            
+            # Update MongoDB
+            if self.sessions_collection:
+                try:
+                    self.sessions_collection.update_one(
+                        {"session_id": session_id},
+                        {
+                            "$addToSet": {"run_ids": run_id},
+                            "$set": {"updated_at": session.updated_at}
+                        }
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to update session with run_id: {e}")
