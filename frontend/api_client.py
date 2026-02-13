@@ -14,12 +14,14 @@ class TerraformAPIClient:
     # CONVERSATION ENDPOINTS
     # ========================================================================
 
-    def create_conversation(self, provider: str = "aws", github_url: str = "", github_token: str = "") -> Dict[str, Any]:
+    def create_conversation(self, provider: str = "aws", github_url: str = "", github_token: str = "", github_branch: str = "") -> Dict[str, Any]:
         params = {"provider": provider}
         if github_url:
             params["github_url"] = github_url
         if github_token:
             params["github_token"] = github_token
+        if github_branch:
+            params["github_branch"] = github_branch
             
         response = self.session.post(
             f"{self.base_url}/conversations",

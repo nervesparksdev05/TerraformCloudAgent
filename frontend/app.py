@@ -18,81 +18,250 @@ st.set_page_config(
 st.markdown(
     """
 <style>
+/* ── Google Font ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
 
-/* UNIVERSAL TEXT READABILITY - FORCE BLACK */
-html, body, [class*="css"], [data-testid="stAppViewContainer"], [data-testid="stSidebar"], .stMarkdown, .stMarkdown p, .stMarkdown span, .stMarkdown div, .stMarkdown li, .stMarkdown ul, .stMarkdown ol, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4, .stMarkdown h5, .stMarkdown h6, .stCaption, label, .stTextInput input, .stTextArea textarea, .stSelectbox, .stMultiSelect {
-    color: #000000 !important;
-    font-family: 'Inter', sans-serif;
+/* ── Base Typography ── */
+html, body, [class*="css"],
+[data-testid="stAppViewContainer"],
+[data-testid="stSidebar"],
+.stMarkdown, .stMarkdown p, .stMarkdown span, .stMarkdown div,
+.stMarkdown li, .stMarkdown ul, .stMarkdown ol,
+.stCaption, label,
+.stTextInput input, .stTextArea textarea,
+.stSelectbox, .stMultiSelect {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    color: #0F172A;
 }
 
-/* Backgrounds */
+/* Secondary text */
+.stCaption, [data-testid="stCaptionContainer"] {
+    color: #475569 !important;
+}
+
+/* ── Backgrounds ── */
 .stApp {
-    background-color: #ffffff;
+    background-color: #F8FAFC;
 }
 
-/* Sidebar */
+/* ── Sidebar ── */
 section[data-testid="stSidebar"] {
-    background-color: #f8fafc;
-    border-right: 1px solid #e2e8f0;
+    background-color: #FFFFFF;
+    border-right: 1px solid #E2E8F0;
 }
 
-/* Cards & Containers */
-.block-container, 
+section[data-testid="stSidebar"] .stMarkdown p,
+section[data-testid="stSidebar"] label {
+    color: #0F172A;
+}
+
+/* ── Cards & Containers ── */
+.block-container {
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+}
+
 .example-card,
 .import-section,
-.tca-card,
-.stChatMessage {
-    background: #ffffff !important;
-    border: 1px solid #e2e8f0 !important;
-    border-radius: 8px !important;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+.tca-card {
+    background: #FFFFFF !important;
+    border: 1px solid #E2E8F0 !important;
+    border-radius: 6px !important;
+    padding: 1rem;
 }
 
-/* Chat Input Area */
+/* Chat messages */
+.stChatMessage {
+    background: #FFFFFF !important;
+    border: 1px solid #E2E8F0 !important;
+    border-radius: 6px !important;
+}
+
+/* ── Chat Input ── */
 [data-testid="stChatInput"] {
-    background-color: #ffffff !important;
+    background-color: #FFFFFF !important;
 }
 
 [data-testid="stChatInput"] textarea {
-    color: #000000 !important;
-    background-color: #ffffff !important; 
-    border: 1px solid #cbd5e1 !important;
+    color: #0F172A !important;
+    background-color: #FFFFFF !important;
+    border: 1px solid #E2E8F0 !important;
+    border-radius: 6px !important;
+    font-family: 'Inter', sans-serif;
 }
 
-/* Code Blocks */
+[data-testid="stChatInput"] textarea:focus {
+    border-color: #2563EB !important;
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15) !important;
+}
+
+/* ── Code Blocks ── */
 code {
-    color: #d946ef !important; /* Pink/Purple for code contrast */
-    background: #f1f5f9 !important;
-    padding: 0.2rem 0.4rem;
+    color: #1E293B !important;
+    background: #F1F5F9 !important;
+    padding: 0.15rem 0.35rem;
     border-radius: 4px;
+    font-size: 0.875em;
 }
 
 pre {
-    background: #f1f5f9 !important;
-    border: 1px solid #e2e8f0;
+    background: #F1F5F9 !important;
+    border: 1px solid #E2E8F0;
     border-radius: 6px;
 }
 
 pre code {
-    color: #0f172a !important; /* Dark text for code blocks */
+    color: #1E293B !important;
     background: transparent !important;
 }
 
-/* Headings */
+/* ── Headings ── */
 h1, h2, h3, h4, h5, h6 {
-    color: #1e3a8a !important; /* Dark Blue for Headers */
-    font-weight: 700 !important;
+    color: #0F172A !important;
+    font-weight: 600 !important;
+    letter-spacing: -0.01em;
 }
 
-/* User Input Text */
-.stTextInput > div > div > input {
-    color: #000000 !important;
-    caret-color: #000000 !important;
+h1 { font-size: 1.75rem !important; }
+h2 { font-size: 1.375rem !important; }
+h3 { font-size: 1.125rem !important; }
+
+/* ── Form Inputs ── */
+.stTextInput > div > div > input,
+.stTextArea textarea {
+    color: #0F172A !important;
+    caret-color: #0F172A !important;
+    border: 1px solid #E2E8F0 !important;
+    border-radius: 6px !important;
+    transition: border-color 0.15s ease;
+}
+
+.stTextInput > div > div > input:focus,
+.stTextArea textarea:focus {
+    border-color: #2563EB !important;
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15) !important;
+}
+
+/* ── Buttons ── */
+.stButton > button {
+    border-radius: 6px !important;
+    font-weight: 500 !important;
+    font-family: 'Inter', sans-serif !important;
+    transition: background-color 0.15s ease, box-shadow 0.15s ease !important;
+}
+
+.stButton > button[kind="primary"],
+.stButton > button[data-testid="stBaseButton-primary"] {
+    background-color: #2563EB !important;
+    border: none !important;
+    color: #FFFFFF !important;
+}
+
+.stButton > button[kind="primary"]:hover,
+.stButton > button[data-testid="stBaseButton-primary"]:hover {
+    background-color: #1D4ED8 !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1) !important;
+}
+
+.stButton > button[kind="secondary"],
+.stButton > button[data-testid="stBaseButton-secondary"] {
+    background-color: #FFFFFF !important;
+    border: 1px solid #E2E8F0 !important;
+    color: #0F172A !important;
+}
+
+.stButton > button[kind="secondary"]:hover,
+.stButton > button[data-testid="stBaseButton-secondary"]:hover {
+    background-color: #F1F5F9 !important;
+    border-color: #CBD5E1 !important;
+}
+
+/* ── Tabs ── */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 0.25rem;
+    border-bottom: 1px solid #E2E8F0;
+}
+
+.stTabs [data-baseweb="tab"] {
+    font-family: 'Inter', sans-serif;
+    font-weight: 500;
+    color: #475569;
+    padding: 0.5rem 1rem;
+    border-radius: 6px 6px 0 0;
+}
+
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+    color: #2563EB;
+    border-bottom: 2px solid #2563EB;
+}
+
+/* ── Dividers ── */
+hr {
+    border-color: #E2E8F0 !important;
+}
+
+/* ── Metrics ── */
+[data-testid="stMetricValue"] {
+    color: #0F172A !important;
+    font-weight: 600 !important;
+}
+
+[data-testid="stMetricLabel"] {
+    color: #475569 !important;
+}
+
+/* ── Expander ── */
+.streamlit-expanderHeader {
+    font-weight: 500;
+    color: #0F172A;
+}
+
+/* ── Welcome / Custom Sections ── */
+.welcome-header {
+    text-align: center;
+    padding: 2rem 0 1rem;
+}
+
+.welcome-title {
+    font-size: 1.75rem;
+    font-weight: 600;
+    color: #0F172A;
+}
+
+.welcome-subtitle {
+    font-size: 1rem;
+    color: #475569;
+    margin-top: 0.25rem;
+}
+
+.tca-title {
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: #0F172A;
+}
+
+.tca-sub {
+    font-size: 0.8125rem;
+    color: #475569;
+    margin-top: 0.125rem;
+}
+
+.section-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #0F172A;
+    margin-bottom: 0.25rem;
+}
+
+.section-subtitle {
+    font-size: 0.875rem;
+    color: #475569;
+    margin-bottom: 0.75rem;
 }
 
 </style>
 """,
-unsafe_allow_html=True,
+    unsafe_allow_html=True,
 )
 
 
@@ -119,19 +288,19 @@ def init_state() -> None:
             st.session_state[key] = value
 
 
-def start_new_conversation(github_url: str = "", github_token: str = "") -> None:
+def start_new_conversation(github_url: str = "", github_token: str = "", github_branch: str = "") -> None:
     try:
         if github_url:
             # Stage 1: Fetch README
             with st.spinner("📥 Fetching README from GitHub..."):
-                result = api_client.create_conversation(provider="aws", github_url=github_url, github_token=github_token)
+                result = api_client.create_conversation(provider="aws", github_url=github_url, github_token=github_token, github_branch=github_branch)
             
             # Show fetch success
             st.info("✅ README fetched successfully! Analyzing content...")
             time.sleep(0.5)  # Brief pause to show the message
         else:
             with st.spinner("Starting conversation..."):
-                result = api_client.create_conversation(provider="aws", github_url=github_url, github_token=github_token)
+                result = api_client.create_conversation(provider="aws", github_url=github_url, github_token=github_token, github_branch=github_branch)
         
         st.session_state.session_id = result["session_id"]
         st.session_state.messages = [{"role": "assistant", "content": result["bot_response"], "suggestions": []}]
@@ -340,7 +509,7 @@ def render_chat_tab() -> None:
         st.markdown('<div class="section-title">Import from GitHub</div>', unsafe_allow_html=True)
         st.markdown('<div class="section-subtitle">Enter repository details to detect project requirements</div>', unsafe_allow_html=True)
         
-        col_owner, col_repo = st.columns(2)
+        col_owner, col_repo, col_branch = st.columns([1, 1, 0.7])
         with col_owner:
             github_owner = st.text_input(
                 "Owner",
@@ -357,6 +526,14 @@ def render_chat_tab() -> None:
                 key="github_repo_input"
             )
 
+        with col_branch:
+            github_branch = st.text_input(
+                "Branch (Optional)",
+                placeholder="main",
+                help="Switch branch",
+                key="github_branch_input"
+            )
+ 
         github_token = st.text_input(
             "Personal Access Token (Optional)",
             placeholder="ghp_...",
@@ -369,7 +546,7 @@ def render_chat_tab() -> None:
         with col1:
             if st.button("Import from GitHub", type="primary", use_container_width=True, disabled=not (github_owner.strip() and github_repo.strip())):
                 full_url = f"https://github.com/{github_owner.strip()}/{github_repo.strip()}"
-                start_new_conversation(github_url=full_url, github_token=github_token.strip())
+                start_new_conversation(github_url=full_url, github_token=github_token.strip(), github_branch=github_branch.strip())
                 st.rerun()
         
         with col2:

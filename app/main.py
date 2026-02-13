@@ -69,7 +69,7 @@ app = FastAPI(
 # ============================================================================
 
 @app.post("/conversations", response_model=ConversationCreateResponse, status_code=201)
-async def create_conversation(provider: str = "aws", github_url: str = "", github_token: str = ""):
+async def create_conversation(provider: str = "aws", github_url: str = "", github_token: str = "", github_branch: str = ""):
     """
     Start a new intelligent conversational session for infrastructure deployment.
 
@@ -84,7 +84,7 @@ async def create_conversation(provider: str = "aws", github_url: str = "", githu
     5. POST /runs/{run_id}/approve      — Deploy
     """
     try:
-        result = await conversation_manager.create_session(provider=provider, github_url=github_url, github_token=github_token)
+        result = await conversation_manager.create_session(provider=provider, github_url=github_url, github_token=github_token, github_branch=github_branch)
         logger.info(f"Created conversation session: {result['session_id']}")
         return ConversationCreateResponse(
             session_id=result["session_id"],
@@ -561,6 +561,7 @@ try:
             ],
             temperature=0.3,
             max_tokens=600,
+            model_override=config.GEMINI_MODEL_CHAT
         )
         return response_content
 
@@ -573,6 +574,7 @@ except ImportError:
             ],
             temperature=0.3,
             max_tokens=600,
+            model_override=config.GEMINI_MODEL_CHAT
         )
         return response_content
 

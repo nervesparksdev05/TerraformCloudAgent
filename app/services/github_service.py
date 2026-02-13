@@ -18,7 +18,7 @@ class GithubService:
     def __init__(self):
         self.token = config.GITHUB_TOKEN if hasattr(config, "GITHUB_TOKEN") else None
 
-    async def fetch_readme(self, repo_url: str, token: Optional[str] = None) -> str:
+    async def fetch_readme(self, repo_url: str, token: Optional[str] = None, branch: Optional[str] = None) -> str:
         """
         Fetch and decode the README from a public GitHub repository.
         """
@@ -27,6 +27,8 @@ class GithubService:
             raise ValueError("Invalid GitHub URL. Expected format: https://github.com/owner/repo")
             
         api_url = f"https://api.github.com/repos/{owner}/{repo}/readme"
+        if branch:
+            api_url += f"?ref={branch}"
         
         headers = {
             "Accept": "application/vnd.github+json",

@@ -50,9 +50,11 @@ class LLMService:
         Synchronous chat completion.
         """
         try:
-            if self.llm_provider == "openai" and self.openai_client:
+            current_provider = self.llm_provider
+            
+            if current_provider == "openai" and self.openai_client:
                 return self._call_openai(messages, temperature, max_tokens, response_format, timeout)
-            elif self.llm_provider == "gemini" and self.gemini_model:
+            elif current_provider == "gemini" and self.gemini_model:
                 return self._call_gemini(messages, temperature, max_tokens, response_format)
             else:
                 # Fallback or error
@@ -83,16 +85,25 @@ class LLMService:
         response = self.openai_client.chat.completions.create(**kwargs)
         return response.choices[0].message.content
 
+    # Models that do NOT support JSON response mode
+    _NO_JSON_MODE_PREFIXES = ("gemma-",)
+
+    def _model_supports_json_mode(self) -> bool:
+        """Check if the current Gemini model supports response_mime_type JSON."""
+        model_name = (config.GEMINI_MODEL or "").lower()
+        return not any(model_name.startswith(p) for p in self._NO_JSON_MODE_PREFIXES)
+
     def _call_gemini(self, messages, temperature, max_tokens, response_format) -> str:
         # Convert OpenAI-style messages to Gemini history
         gemini_hist = []
         system_instruction = None
+        json_requested = response_format and response_format.get("type") == "json_object"
         
         for msg in messages:
             role = msg["role"]
             content = msg["content"]
             if role == "system":
-                system_instruction = content # Gemini supports system instructions now
+                system_instruction = content
             elif role == "user":
                 gemini_hist.append({"role": "user", "parts": [content]})
             elif role == "assistant":
@@ -104,15 +115,21 @@ class LLMService:
             max_output_tokens=max_tokens,
         )
         
-        if response_format and response_format.get("type") == "json_object":
-             generation_config.response_mime_type = "application/json"
+        # Only set JSON mime type for models that support it
+        if json_requested and self._model_supports_json_mode():
+            generation_config.response_mime_type = "application/json"
+        elif json_requested:
+            # Fallback: instruct the model via prompt to return JSON
+            logger.info(f"Model {config.GEMINI_MODEL} does not support JSON mode; using prompt-based JSON.")
+            json_hint = "\n\nIMPORTANT: Respond ONLY with valid JSON. No markdown, no explanation, just the JSON object."
+            if system_instruction:
+                system_instruction += json_hint
+            elif gemini_hist:
+                # Append hint to the last user message
+                last = gemini_hist[-1]
+                last["parts"] = [last["parts"][0] + json_hint]
 
-        # If system instruction is present, use a model capable of it or prepend to history?
-        # newer gemini-1.5-pro/flash supports system_instruction kwarg in GenerativeModel
-        # We initialized self.gemini_model earlier. Let's create a fresh one if system prompt exists
-        # or just use start_chat.
-        
-        # Simpler approach for single-turn-like behavior with chat history
+        # Create model with system instruction if present
         model = self.gemini_model
         if system_instruction:
              model = genai.GenerativeModel(

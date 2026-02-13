@@ -396,7 +396,7 @@ EDGE CASES
     # SESSION MANAGEMENT
     # ================================================================
 
-    async def create_session(self, provider: str = "aws", github_url: str = "", github_token: str = "") -> Dict[str, Any]:
+    async def create_session(self, provider: str = "aws", github_url: str = "", github_token: str = "", github_branch: str = "") -> Dict[str, Any]:
         """
         Create a new session, optionally importing from a GitHub repo.
         """
@@ -414,7 +414,7 @@ EDGE CASES
         # GitHub Import Logic
         if github_url:
             try:
-                readme_content = await self.github_service.fetch_readme(github_url, token=github_token)
+                readme_content = await self.github_service.fetch_readme(github_url, token=github_token, branch=github_branch)
                 if readme_content:
                     # Print full README to terminal (using both logger and print for visibility)
                     separator = f"[{sid}] {'='*60} FETCHED README FROM {github_url} {'='*60}"
