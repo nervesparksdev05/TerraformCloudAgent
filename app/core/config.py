@@ -63,6 +63,9 @@ APP_DESCRIPTION = (
     "LLM-powered Terraform agent for AWS, GCP, Azure, and DigitalOcean"
 )
 
+# === Admin & Feedback ===
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "secret-admin-key")
+
 # === Directories ===
 BASE_DIR = Path(__file__).parent.parent.parent
 WORKSPACE_BASE_DIR = BASE_DIR / os.getenv("WORKSPACE_BASE_DIR", "runs")

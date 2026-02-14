@@ -1,438 +1,449 @@
 """
-Terraform Agent Streamlit frontend.
+Terraform Cloud Agent - Premium B&W Experience (Tailwind v4)
 """
 import time
-from typing import Any, Dict
+import json
+import re
+from typing import Any, Dict, List, Optional
+from datetime import datetime
 
 import streamlit as st
-
 from api_client import TerraformAPIClient
 
+# Page configuration
 st.set_page_config(
     page_title="Terraform Cloud Agent",
-    page_icon="TCA",
+    page_icon="🚀",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
+# --- Tailwind v4 & Custom Styling ---
 st.markdown(
     """
-<style>
-.block-container {padding-top: 1.5rem;}
-.tca-card {
-  background-color: #262730;
-  border: 1px solid #3f3f46;
-  border-radius: 14px;
-  padding: 0.9rem 1rem;
-}
-.tca-title {font-weight: 700; color: #fafafa; margin-bottom: 0.15rem;}
-.tca-sub {color: #a1a1aa; font-size: 0.9rem;}
-</style>
+    <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        
+        :root {
+            --st-background-color: #0F172A; /* Slate-900 */
+            --st-secondary-background-color: #1E293B; /* Slate-800 */
+            --st-text-color: #F8FAFC; /* Slate-50 */
+        }
+
+        html, body, [class*="css"] {
+            font-family: 'Inter', sans-serif !important;
+            color: #F8FAFC !important;
+        }
+
+        /* Hide Streamlit elements for a cleaner look */
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+
+        .glass-card {
+            background: rgba(30, 41, 59, 0.7); /* Slate-800 with opacity */
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 16px;
+            padding: 2.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+
+        /* Button Styling */
+        .stButton button {
+            background-color: #F8FAFC !important;
+            color: #0F172A !important;
+            border-radius: 8px !important;
+            border: none !important;
+            font-weight: 600 !important;
+            letter-spacing: -0.01em !important;
+            padding: 0.6rem 1.2rem !important;
+            transition: all 0.2s ease !important;
+        }
+        .stButton button:hover {
+            background-color: #E2E8F0 !important; /* Slate-200 */
+            transform: translateY(-1px);
+            box-shadow: 0 10px 15px -3px rgba(255, 255, 255, 0.1);
+        }
+        
+        /* Input Styling */
+        .stTextInput input {
+            background-color: rgba(15, 23, 42, 0.6) !important; /* Slate-900 with opacity */
+            color: #F8FAFC !important;
+            border: 1px solid rgba(255, 255, 255, 0.1) !important;
+            border-radius: 8px !important;
+            padding: 0.6rem 1rem !important;
+        }
+        .stTextInput input:focus {
+            border-color: #F8FAFC !important;
+            box-shadow: 0 0 0 2px rgba(248, 250, 252, 0.1) !important;
+        }
+    </style>
     """,
     unsafe_allow_html=True,
 )
 
-
+# --- API Client ---
 @st.cache_resource
 def get_api_client() -> TerraformAPIClient:
     return TerraformAPIClient(base_url="http://localhost:8000")
 
-
 api_client = get_api_client()
 
-
+# --- App State ---
 def init_state() -> None:
     defaults: Dict[str, Any] = {
+        "page": "CONNECT",  # CONNECT, DISCOVERY, SUMMARY, REFINE, DEPLOY
         "session_id": None,
+        "github_url": "",
+        "repo_name": "",
         "messages": [],
-        "conversation_complete": False,
         "collected_parameters": {},
+        "is_complete": False,
         "run_id": None,
+        "terraform_files": {},
+        "current_step": 1,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
+def set_page(page: str):
+    st.session_state.page = page
+    st.rerun()
 
-def start_new_conversation() -> None:
+# --- Logic Actions ---
+def start_session(github_url: str, token: str = ""):
     try:
-        with st.spinner("Starting conversation..."):
-            result = api_client.create_conversation(provider="aws")
-        st.session_state.session_id = result["session_id"]
-        st.session_state.messages = [{"role": "assistant", "content": result["bot_response"], "suggestions": []}]
-        st.session_state.conversation_complete = False
-        st.session_state.collected_parameters = {}
-        st.session_state.run_id = None
-    except Exception as exc:
-        st.error(f"Failed to start conversation: {exc}")
+        with st.spinner("Connecting to repository..."):
+            result = api_client.create_conversation(github_url, github_token=token)
+            st.session_state.session_id = result["session_id"]
+            st.session_state.github_url = github_url
+            st.session_state.repo_name = github_url.split("/")[-1].replace(".git", "")
+            
+            # Auto-analyze to get discovery started
+            analysis = api_client.analyze_readme(result["session_id"])
+            st.session_state.messages = [{"role": "assistant", "content": analysis["bot_response"]}]
+            
+            set_page("DISCOVERY")
+    except Exception as e:
+        st.error(f"Connection failed: {e}")
 
-
-def load_session(session_id: str) -> None:
-    """Load a past session into state."""
+def send_chat(msg: str):
+    if not st.session_state.session_id: return
+    st.session_state.messages.append({"role": "user", "content": msg})
     try:
-        with st.spinner("Loading session..."):
-            session_data = api_client.get_conversation(session_id)
-        
-        st.session_state.session_id = session_id
-        # Restore messages
-        messages = session_data.get("messages", [])
-        # Filter for UI-relevant messages only (user/assistant)
-        st.session_state.messages = [
-            m for m in messages if m.get("role") in ("user", "assistant")
-        ]
-        
-        st.session_state.collected_parameters = session_data.get("collected_parameters", {})
-        st.session_state.conversation_complete = session_data.get("is_complete", False)
-        
-        # Restore run_id if available (take the last one if multiple)
-        run_ids = session_data.get("run_ids", [])
-        st.session_state.run_id = run_ids[-1] if run_ids else None
-        
-    except Exception as exc:
-        st.error(f"Failed to reload session: {exc}")
+        with st.spinner("Analyzing architecturally..."):
+            resp = api_client.send_message(st.session_state.session_id, msg)
+            st.session_state.messages.append({"role": "assistant", "content": resp["bot_response"]})
+            st.session_state.is_complete = resp.get("is_complete", False)
+            st.session_state.collected_parameters = resp.get("collected_parameters", {})
+            if st.session_state.is_complete:
+                # If complete, let's pre-generate the summary
+                generate_code()
+    except Exception as e:
+        st.error(f"Chat error: {e}")
 
-
-
-def send_user_message(user_message: str) -> None:
-    if not st.session_state.session_id:
-        st.error("Start a conversation first.")
-        return
-    st.session_state.messages.append({"role": "user", "content": user_message})
+def generate_code():
     try:
-        with st.spinner("Thinking..."):
-            response = api_client.send_message(
-                session_id=st.session_state.session_id,
-                message=user_message,
-            )
-        st.session_state.messages.append(
-            {
-                "role": "assistant",
-                "content": response["bot_response"],
-                "suggestions": response.get("suggestions", []),
-            }
-        )
-        st.session_state.collected_parameters = response["collected_parameters"]
-        st.session_state.conversation_complete = bool(response["is_complete"])
-    except Exception as exc:
-        st.error(f"Failed to send message: {exc}")
-        if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
-            st.session_state.messages.pop()
+        with st.spinner("Forging Terraform infrastructure..."):
+            resp = api_client.generate_terraform(st.session_state.session_id)
+            st.session_state.run_id = resp["run_id"]
+            files_resp = api_client.get_run_files(resp["run_id"])
+            st.session_state.terraform_files = files_resp.get("files", {})
+            set_page("SUMMARY")
+    except Exception as e:
+        st.error(f"Generation error: {e}")
 
+# --- Pages ---
 
-def generate_terraform() -> None:
-    if not st.session_state.conversation_complete:
-        st.warning("Complete the conversation first.")
-        return
+def render_connect():
+    st.markdown('<div class="flex flex-col items-center justify-center min-h-[70vh]">', unsafe_allow_html=True)
+    
+    # Hero
+    st.markdown("""
+        <div class="text-center mb-12">
+            <h1 class="text-6xl font-bold tracking-tight text-white mb-4">Terraform Cloud Agent</h1>
+            <p class="text-gray-400 text-xl max-w-2xl mx-auto">
+                The most intelligent way to deploy GitHub repositories. <br/>
+                Analyze. Architect. Automate.
+            </p>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    # Input Card
+    with st.container():
+        st.markdown('<div class="glass-card w-full max-w-2xl mx-auto">', unsafe_allow_html=True)
+        repo_url = st.text_input("GitHub Repository URL", placeholder="https://github.com/org/repo")
+        repo_name_override = st.text_input("Repository Name (Optional)", placeholder="My Project")
+        token = st.text_input("Access Token (Optional)", type="password", placeholder="ghp_...")
+        
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            if st.button("Initialize Deployment", use_container_width=True):
+                if repo_url:
+                    if repo_name_override:
+                        st.session_state.repo_name = repo_name_override
+                    start_session(repo_url, token)
+                else:
+                    st.warning("Please enter a valid GitHub URL.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Recent Sessions
+    st.markdown('<div class="mt-16 w-full max-w-4xl mx-auto">', unsafe_allow_html=True)
+    st.markdown('<h3 class="text-white text-lg font-semibold mb-6 border-b border-white/10 pb-2">Recent Sessions</h3>', unsafe_allow_html=True)
     try:
-        with st.spinner("Generating Terraform..."):
-            result = api_client.generate_terraform(st.session_state.session_id)
-        st.session_state.run_id = result["run_id"]
-        st.success(f"Terraform generated: {result['run_id'][:12]}...")
-    except Exception as exc:
-        st.error(f"Failed to generate Terraform: {exc}")
+        sessions = api_client.get_sessions(limit=3)
+        if sessions:
+            cols = st.columns(3)
+            for i, s in enumerate(sessions):
+                with cols[i]:
+                    st.markdown(f"""
+                        <div class="glass-card bg-white/5 border-white/5 p-4 h-full">
+                            <div class="text-sm text-gray-400 mb-1">{s['session_id'][:8]}</div>
+                            <div class="text-white font-medium truncate">{s['github_url'].split('/')[-1]}</div>
+                            <div class="mt-4 text-xs {'text-green-400' if s.get('is_complete') else 'text-yellow-400'}">
+                                {'● Ready' if s.get('is_complete') else '● In Progress'}
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                    if st.button("Resume", key=f"res_{s['session_id']}", use_container_width=True):
+                        st.session_state.session_id = s['session_id']
+                        st.session_state.github_url = s['github_url']
+                        st.session_state.repo_name = s['github_url'].split('/')[-1]
+                        set_page("DISCOVERY")
+        else:
+            st.caption("No recent deployments found.")
+    except:
+        st.caption("Ready to start something new.")
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
+def render_discovery():
+    # Progress Header
+    st.markdown(f"""
+        <div class="flex items-center justify-between mb-8 border-b border-white/10 pb-4">
+            <div>
+                <h2 class="text-2xl font-bold text-white tracking-tight">{st.session_state.repo_name}</h2>
+                <div class="text-gray-400 text-sm">Step 2: Architecture Discovery & Logic Gathering</div>
+            </div>
+            <div class="text-right">
+                <div class="text-xs text-gray-500 uppercase tracking-widest">Architect</div>
+                <div class="text-white font-semibold">DevOps Friend GPT</div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
 
-def _status_variant(status: str) -> str:
-    if status in ("pending_approval", "planned", "reviewing"):
-        return "info"
-    if status in ("approved", "applying", "applied", "completed"):
-        return "success"
-    if status in ("failed", "destroyed"):
-        return "error"
-    return "warning"
+    col_chat, col_meta = st.columns([2, 1])
 
-
-def _render_status(status: str) -> None:
-    variant = _status_variant(status)
-    if variant == "success":
-        st.success(f"Status: {status}")
-    elif variant == "error":
-        st.error(f"Status: {status}")
-    elif variant == "warning":
-        st.warning(f"Status: {status}")
-    else:
-        st.info(f"Status: {status}")
-
-
-def render_sidebar() -> None:
-    with st.sidebar:
-        st.markdown('<div class="tca-card">', unsafe_allow_html=True)
-        st.markdown('<div class="tca-title">Terraform Cloud Agent</div>', unsafe_allow_html=True)
-        st.markdown('<div class="tca-sub">Your friendly cloud infrastructure buddy 👋</div>', unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+    with col_chat:
+        st.markdown('<div class="glass-card min-h-[500px] flex flex-col justify-between p-4">', unsafe_allow_html=True)
+        # Chat container
+        chat_placeholder = st.container()
+        with chat_placeholder:
+            for m in st.session_state.messages:
+                with st.chat_message(m["role"]):
+                    st.markdown(m["content"])
+        
+        # Spacer
         st.write("")
-
-        # New Chat Button
-        if st.button("➕ New Chat", use_container_width=True, type="primary"):
-            start_new_conversation()
-            st.rerun()
-
-        st.divider()
-
-        # Session History
-        st.markdown("### Recent Chats")
-        sessions = api_client.get_sessions(limit=10)
         
-        # Workload type icons
-        workload_icons = {
-            "web_server": "🌐",
-            "api": "🔌",
-            "app_server": "📱",
-            "database": "🗄️",
-            "batch": "⚙️",
-            "custom": "🔧"
-        }
-        
-        for sess in sessions:
-            title = sess.get("title", "New Conversation")
-            sid = sess.get("session_id")
-            workload_type = sess.get("workload_type", "")
-            
-            # Get icon for workload type
-            icon = workload_icons.get(workload_type, "💬")
-            
-            # Highlight current session
-            is_active = (sid == st.session_state.session_id)
-            
-            # Create columns for icon, session button, and delete button
-            col1, col2, col3 = st.columns([0.5, 5, 0.5])
-            
-            with col1:
-                st.markdown(f"<div style='font-size: 1.2em; padding-top: 4px;'>{icon}</div>", unsafe_allow_html=True)
-            
-            with col2:
-                button_type = "primary" if is_active else "secondary"
-                if st.button(
-                    title, 
-                    key=f"btn_{sid}", 
-                    use_container_width=True,
-                    type=button_type,
-                    help=f"Session ID: {sid[:12]}..."
-                ):
-                    if not is_active:
-                        load_session(sid)
-                        st.rerun()
-            
-            with col3:
-                if st.button("🗑️", key=f"del_{sid}", help="Delete session"):
-                    try:
-                        api_client.delete_session(sid)
-                        # If deleting active session, clear state
-                        if is_active:
-                            st.session_state.session_id = None
-                            st.session_state.messages = []
-                            st.session_state.conversation_complete = False
-                            st.session_state.collected_parameters = {}
-                            st.session_state.run_id = None
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to delete: {e}")
-
-        if not sessions:
-            st.caption("No history yet.")
-
-        st.divider()
-
-        if st.session_state.session_id:
-            st.caption(f"Active: {st.session_state.session_id[:8]}...")
-            if st.session_state.conversation_complete:
-                st.success("✅ Parameters Complete")
-            else:
-                st.info("✍️ Collecting Params")
-        else:
-            st.warning("No active conversation")
-
-        if st.session_state.collected_parameters:
-            with st.expander("Collected Parameters", expanded=False):
-                st.json(st.session_state.collected_parameters)
-
-        if st.session_state.run_id:
-            st.caption(f"Run: {st.session_state.run_id[:12]}...")
-
-
-def render_chat_tab() -> None:
-    st.subheader("Conversation")
-    st.caption("Chat with your friendly cloud expert. Just answer naturally - no technical knowledge needed!")
-
-    if not st.session_state.session_id:
-        st.info("Start a conversation from the sidebar.")
-        return
-
-    for msg in st.session_state.messages:
-        with st.chat_message("user" if msg["role"] == "user" else "assistant"):
-            st.write(msg["content"])
-            if msg["role"] == "assistant" and msg.get("suggestions"):
-                st.caption("Suggestions: " + " | ".join(msg["suggestions"][:6]))
-
-    if st.session_state.conversation_complete:
-        st.success("All required parameters are collected.")
-        if not st.session_state.run_id and st.button("Generate Terraform", type="primary", use_container_width=True):
-            generate_terraform()
-            st.rerun()
-    else:
-        user_input = st.chat_input("Type one message")
-        if user_input and user_input.strip():
-            send_user_message(user_input.strip())
-            st.rerun()
-
-
-def render_review_tab() -> None:
-    st.subheader("Review")
-    if not st.session_state.run_id:
-        st.info("Generate Terraform first.")
-        return
-
-    try:
-        run = api_client.get_run(st.session_state.run_id)
-    except Exception as exc:
-        st.error(f"Failed to load run: {exc}")
-        return
-
-    _render_status(run["status"])
-    st.caption(f"Run ID: {run['run_id']}")
-
-    if run.get("error_message"):
-        st.error(run["error_message"])
-
-    if run["status"] not in ["pending_approval", "approved", "applied", "completed", "reviewing", "planned"]:
-        return
-
-    try:
-        files_payload = api_client.get_run_files(st.session_state.run_id)
-        files = files_payload.get("files", {})
-    except Exception as exc:
-        st.error(f"Failed to load files: {exc}")
-        return
-
-    # Show all three Terraform files in tabs
-    tabs = st.tabs(["📄 main.tf", "⚙️ variables.tf", "📤 outputs.tf"])
-    file_map = {
-        "main.tf": files.get("main_tf", "# Not available"),
-        "variables.tf": files.get("variables_tf", "# Not available"),
-        "outputs.tf": files.get("outputs_tf", "# Not available"),
-    }
-
-    for tab, file_name in zip(tabs, file_map.keys()):
-        with tab:
-            content = file_map[file_name]
-            if content and content != "# Not available":
-                # Calculate line count and size
-                line_count = len(content.split('\n'))
-                size_bytes = len(content.encode('utf-8'))
-                
-                col1, col2, col3 = st.columns([2, 2, 1])
-                with col1:
-                    st.caption(f"📊 {line_count} lines")
-                with col2:
-                    st.caption(f"💾 {size_bytes} bytes")
-                with col3:
-                    st.download_button(
-                        "⬇️ Download",
-                        content,
-                        file_name=file_name,
-                        mime="text/plain",
-                        use_container_width=True,
-                        key=f"dl_{file_name}"
-                    )
-                
-                st.code(content, language="hcl", line_numbers=True)
-            else:
-                st.warning(f"{file_name} is not available yet.")
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        if run["status"] in ["pending_approval", "reviewing", "planned"]:
-            if st.button("Approve & Deploy", type="primary", use_container_width=True):
-                try:
-                    api_client.approve_run(st.session_state.run_id)
-                    st.success("Deployment started.")
-                    time.sleep(0.6)
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Approve failed: {exc}")
-    with c2:
-        if run["status"] in ["pending_approval", "reviewing", "planned"]:
-            if st.button("Reject", use_container_width=True):
-                try:
-                    api_client.reject_run(st.session_state.run_id)
-                    st.warning("Run rejected.")
-                    time.sleep(0.6)
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Reject failed: {exc}")
-    with c3:
-        if run["status"] in ["applied", "completed"]:
-            if st.button("Destroy", use_container_width=True):
-                try:
-                    api_client.destroy_run(st.session_state.run_id)
-                    st.warning("Destroy started.")
-                    time.sleep(0.6)
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Destroy failed: {exc}")
-
-
-def render_manage_tab() -> None:
-    st.subheader("Manage")
-    if not st.session_state.run_id:
-        st.info("No active run.")
-        return
-
-    try:
-        run = api_client.get_run(st.session_state.run_id)
-    except Exception as exc:
-        st.error(f"Failed to load run: {exc}")
-        return
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Provider", str(run.get("provider", "aws")).upper())
-    c2.metric("Status", str(run.get("status", "unknown")))
-    c3.metric("Created", str(run.get("created_at", "n/a"))[:19])
-
-    st.markdown("### Request Changes")
-    edit_message = st.text_area(
-        "Describe changes",
-        placeholder="Example: change instance type to t3.medium and enable autoscaling",
-        height=110,
-        label_visibility="collapsed",
-    )
-    if st.button("Submit Change Request", use_container_width=True):
-        if not edit_message.strip():
-            st.warning("Enter requested changes first.")
-        else:
-            try:
-                api_client.edit_run_message(st.session_state.run_id, edit_message.strip())
-                st.success("Change request submitted.")
-                time.sleep(0.6)
+        # User input
+        if not st.session_state.is_complete:
+            query = st.chat_input("Explain your deployment constraints...")
+            # Only rerun if query was actually sent
+            if query:
+                send_chat(query)
                 st.rerun()
-            except Exception as exc:
-                st.error(f"Change request failed: {exc}")
+        else:
+            st.success("Configuration finalized. Proceeding to Summary.")
+            if st.button("View Infrastructure Draft"):
+                set_page("SUMMARY")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("### Ask About This Run")
-    question = st.text_input(
-        "Ask a question",
-        placeholder="Example: what ports are exposed?",
-        label_visibility="collapsed",
-    )
-    if st.button("Ask", use_container_width=True) and question.strip():
-        try:
-            response = api_client.chat_about_run(st.session_state.run_id, question.strip())
-            st.info(response.get("response", "No response"))
-        except Exception as exc:
-            st.error(f"Run chat failed: {exc}")
+    with col_meta:
+        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+        st.markdown('<h4 class="text-white font-bold mb-4">Detected Model</h4>', unsafe_allow_html=True)
+        if st.session_state.collected_parameters:
+            for k, v in st.session_state.collected_parameters.items():
+                if isinstance(v, list): v = ", ".join(v)
+                st.markdown(f"""
+                    <div class="mb-3">
+                        <div class="text-xs text-gray-500 uppercase">{k.replace("_", " ")}</div>
+                        <div class="text-white font-medium">{v}</div>
+                    </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.caption("Discovery ongoing...")
+        st.markdown('</div>', unsafe_allow_html=True)
 
+def render_summary():
+    st.markdown("""
+        <div class="mb-8">
+            <h2 class="text-3xl font-bold text-white leading-tight">Infrastructure Blueprint</h2>
+            <p class="text-gray-400">Review the generated Terraform manifest for your workload.</p>
+        </div>
+    """, unsafe_allow_html=True)
 
-def main() -> None:
+    files = st.session_state.terraform_files
+    if not files:
+        st.warning("No code generated yet.")
+        if st.button("Regenerate"): generate_code()
+        return
+
+    col_files, col_actions = st.columns([2, 1])
+
+    with col_files:
+        st.markdown('<div class="glass-card p-0 overflow-hidden">', unsafe_allow_html=True)
+        tabs = st.tabs([f"📄 {fn}" for fn in files.keys()])
+        for i, (fn, content) in enumerate(files.items()):
+            with tabs[i]:
+                st.code(content, language="hcl", line_numbers=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_actions:
+        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+        st.markdown('<h4 class="text-white font-bold mb-6">Workflow Selection</h4>', unsafe_allow_html=True)
+        
+        if st.button("✏️ Refine & Edit Manually", use_container_width=True):
+            set_page("REFINE")
+            
+        st.write("")
+        if st.button("🚀 Push to Cloud (Deploy)", type="primary", use_container_width=True):
+            api_client.approve_run(st.session_state.run_id)
+            set_page("DEPLOY")
+            
+        st.markdown('<div class="mt-8 border-t border-white/10 pt-4">', unsafe_allow_html=True)
+        st.caption("Summary of resources:")
+        # Simple counts
+        res_count = len(re.findall(r'resource\s+"', files.get("main.tf", "")))
+        st.markdown(f"**{res_count}** Cloud Resources detected.")
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+def render_refine():
+    st.markdown("""
+        <div class="mb-8">
+            <h2 class="text-3xl font-bold text-white">Refinement Lab</h2>
+            <p class="text-gray-400">Modify the HCL or prompt the agent to adjust the architecture.</p>
+        </div>
+    """, unsafe_allow_html=True)
+
+    col_edit, col_chat = st.columns([1, 1])
+
+    with col_edit:
+        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+        st.write("Manual HCL Override")
+        files = st.session_state.terraform_files
+        editing_file = st.selectbox("Select file to edit", list(files.keys()))
+        new_content = st.text_area("HCL Content", value=files.get(editing_file), height=400)
+        if st.button("Save Changes"):
+            st.session_state.terraform_files[editing_file] = new_content
+            st.success("File updated localy.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_chat:
+        st.markdown('<div class="glass-card min-h-[500px] flex flex-col justify-between p-4">', unsafe_allow_html=True)
+        st.write("Chat-based Adjustment")
+        edit_msg = st.text_area("What should I change?", placeholder="e.g. 'Add a backup policy', 'Switch to t4g instances'...")
+        if st.button("Apply AI Refinement", type="primary"):
+            try:
+                with st.spinner("Adjusting architecture..."):
+                    resp = api_client.edit_run_message(st.session_state.run_id, edit_msg)
+                    st.info(f"Agent: {resp['bot_response']}")
+                    # Re-fetch files
+                    files_resp = api_client.get_run_files(st.session_state.run_id)
+                    st.session_state.terraform_files = files_resp.get("files", {})
+                    st.rerun()
+            except Exception as e:
+                st.error(e)
+        
+        st.divider()
+        if st.button("← Back to Review"): set_page("SUMMARY")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+def render_deploy():
+    st.markdown("""
+        <div class="mb-12 text-center">
+            <h2 class="text-4xl font-bold text-white">Deployment Control Tower</h2>
+            <p class="text-gray-400">Orchestrating infrastructure across your cloud provider.</p>
+        </div>
+    """, unsafe_allow_html=True)
+
+    try:
+        run = api_client.get_run(st.session_state.run_id)
+        status = run.get("status", "pending")
+        
+        st.markdown(f"""
+            <div class="glass-card max-w-4xl mx-auto text-center py-12">
+                <div class="text-sm uppercase tracking-[0.2em] text-gray-500 mb-2">Current Operation Status</div>
+                <div class="text-6xl font-black text-white mb-6">
+                    {status.upper()}
+                </div>
+                <div class="flex justify-center gap-4">
+                    <div class="px-4 py-2 bg-white/5 rounded-full text-xs text-gray-300">Provider: AWS</div>
+                    <div class="px-4 py-2 bg-white/5 rounded-full text-xs text-gray-300">Region: us-east-1</div>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown('<div class="mt-8 glass-card max-w-4xl mx-auto">', unsafe_allow_html=True)
+        st.subheader("Action History & Logs")
+        if run.get("error"):
+            st.error(run["error"])
+        else:
+            st.code("Plan phase completed.\nApply phase in progress...\nOutputs will appear here.", language="text")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+             if st.button("Refresh Status"): st.rerun()
+        with col2:
+            if status in ["completed", "applied"]:
+                if st.button("Destroy Environment", type="secondary"):
+                    api_client.destroy_run(st.session_state.run_id)
+                    st.rerun()
+        
+        if st.button("Return Home"):
+            st.session_state.clear()
+            set_page("CONNECT")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    except Exception as e:
+        st.error(e)
+
+# --- Routing ---
+def main():
     init_state()
-    render_sidebar()
-    tab_chat, tab_review, tab_manage = st.tabs(["Chat", "Review", "Manage"])
-    with tab_chat:
-        render_chat_tab()
-    with tab_review:
-        render_review_tab()
-    with tab_manage:
-        render_manage_tab()
+    
+    # Simple navigation bar for non-CONNECT pages
+    if st.session_state.page != "CONNECT":
+        st.markdown(f"""
+            <div class="flex items-center gap-8 py-4 mb-12 border-b border-white/5">
+                <div class="text-white font-black text-xl cursor-pointer" onclick="window.location.reload()">TCA</div>
+                <div class="flex gap-4">
+                    <span class="text-sm {'text-white font-bold' if st.session_state.page == 'DISCOVERY' else 'text-gray-500'}">Discovery</span>
+                    <span class="text-sm text-gray-800">/</span>
+                    <span class="text-sm {'text-white font-bold' if st.session_state.page == 'SUMMARY' else 'text-gray-500'}">Review</span>
+                    <span class="text-sm text-gray-800">/</span>
+                    <span class="text-sm {'text-white font-bold' if st.session_state.page == 'REFINE' else 'text-gray-500'}">Refine</span>
+                    <span class="text-sm text-gray-800">/</span>
+                    <span class="text-sm {'text-white font-bold' if st.session_state.page == 'DEPLOY' else 'text-gray-500'}">Deploy</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
 
+    if st.session_state.page == "CONNECT":
+        render_connect()
+    elif st.session_state.page == "DISCOVERY":
+        render_discovery()
+    elif st.session_state.page == "SUMMARY":
+        render_summary()
+    elif st.session_state.page == "REFINE":
+        render_refine()
+    elif st.session_state.page == "DEPLOY":
+        render_deploy()
 
 if __name__ == "__main__":
     main()

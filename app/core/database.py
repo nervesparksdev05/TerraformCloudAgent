@@ -6,6 +6,7 @@ from typing import Optional
 from pymongo import MongoClient
 from pymongo.collection import Collection
 from pymongo.database import Database
+import certifi
 from app.core import config
 from app.core.logger import get_logger
 
@@ -25,7 +26,11 @@ class DatabaseManager:
         """Initialize MongoDB connection"""
         if self._client is None:
             try:
-                self._client = MongoClient(config.MONGODB_URI, serverSelectionTimeoutMS=5000)
+                self._client = MongoClient(
+                    config.MONGODB_URI,
+                    serverSelectionTimeoutMS=5000,
+                    tlsCAFile=certifi.where()
+                )
                 # Verify connection
                 self._client.admin.command('ping')
                 self._db = self._client[config.MONGODB_DATABASE]

@@ -1,671 +1,663 @@
-"""
-Conversation Manager – Friendly multi-turn chatbot for EC2 Terraform parameters.
+﻿"""
+Conversation Manager - README-driven deployment flow (Aligned, NO FORMS).
 
-Collects infrastructure requirements through warm, beginner-friendly conversation,
-then builds structured params for LLMGenerator to produce Terraform files.
+Flow:
+1) User provides GitHub URL + provider (+ optional github_token)
+2) Fetch README (GitHubService)
+3) Analyze README (ReadmeAnalyzer) -> terraform_hints aligned with Terraform generator prompt
+4) Chatbot collects ONLY critical missing inputs for real deployment
+5) Build provider-neutral params -> LLM generates Terraform
+6) User can request updates -> existing run edit/refine flow applies (Run endpoints)
+
+NOTE:
+- Validation (terraform fmt / terraform validate / tflint) should live in WorkflowEngine after files are generated.
+  This file only manages conversation + building the terraform request payload.
 """
-from __future__ import annotations
 
 import json
 import secrets
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from openai import AsyncOpenAI
-
-from app.core import config
 from app.core.logger import get_logger
 from app.models.conversation_schemas import (
     ChatMessageResponse,
     ConversationSession,
     ConversationStatus,
 )
+from app.services.github_service import get_github_service
+from app.services.readme_analyzer import get_readme_analyzer
+from app.services.llm_generator import LLMGenerator
 
 logger = get_logger(__name__)
 
 
+_ALLOWED_PROVIDERS = {"aws", "gcp", "azure", "digitalocean"}
+_ALLOWED_ENVS = {"dev", "staging", "prod"}
+
+
 class ConversationManager:
     """
-    Friendly chatbot that collects EC2 deployment parameters.
+    README-driven conversation manager (no forms).
 
-    Flow:
-      1. Warm conversation across 6 stages (1 question per turn)
-      2. Deep-merge extracted params each turn
-      3. Apply secure defaults on completion
-      4. build_terraform_request() → structured dict for LLMGenerator
+    Stages:
+    - ACTIVE: session created, README analyzed, chat ongoing
+    - COMPLETE: minimum required inputs collected to generate Terraform
     """
 
-    # ================================================================
-    # SYSTEM PROMPT
-    # ================================================================
-
-    SYSTEM_PROMPT = """\
-You are a friendly, warm cloud infrastructure expert — like a helpful senior DevOps engineer pair-programming with a colleague. The user may know nothing about cloud — YOU guide them with patience, encouragement, and simple language.
-
-🎯 YOUR PERSONALITY:
-- Warm, encouraging, patient ("Great choice!", "Perfect!", "That works well!")
-- Use cloud-native terminology based on provider:
-  * AWS → "EC2 instances", "regions" (us-east-1, eu-west-1)
-  * GCP → "Compute Engine instances", "regions" (us-central1, europe-west1)
-  * Azure → "Virtual Machines", "regions" (eastus, westeurope)
-  * DigitalOcean → "Droplets", "regions" (nyc1, sfo3)
-- Explain jargon in parentheses when you first use it
-- If user says "you choose" / "I don't know" / "default" → pick the best option, explain why briefly, and move on
-- Acknowledge their answer before asking the next question
-- Keep messages under 120 words (except the final summary)
-- Use bold and bullets for clarity
-
-⚠️ HARD RULES:
-1. You are a parameter collector — NEVER output Terraform/HCL code.
-2. Ask exactly ONE question per turn. No compound questions.
-3. Extract every parameter the user implies — even in passing. Don't re-ask what you already have.
-4. If user says "no" / "none" / "skip" → record it and move on IMMEDIATELY. Never re-ask.
-5. Check [Collected so far: {...}] every turn — skip stages where you have all params.
-6. NEVER accept 0.0.0.0/0 for SSH. Explain the risk, suggest their IP/32 or VPN CIDR.
-7. Use cloud-specific terms consistently throughout the conversation.
-8. CRITICAL: Your "message" MUST always end with a question for the next step, unless "is_complete": true.
-9. If you have collected all parameters for the current stage, increment `current_stage` in your response.
-
-═══════════════════════════════════════════════════════════════
-CONVERSATION STAGES (work through IN ORDER, skip what you have)
-═══════════════════════════════════════════════════════════════
-
-STAGE 1 — What, Where & Which Cloud
-  Collect: workload_type (web_server|api|app_server|database|batch|custom)
-           workload_description (1-2 sentence summary)
-           cloud_provider (aws|gcp|azure|digitalocean)
-           region (cloud-specific region code)
-           environment (dev|staging|prod — default "dev" if unclear)
-  Strategy: 
-    1. Ask "What are you deploying?" → infer workload_type
-    2. Ask "Which cloud provider?" → AWS, GCP, Azure, or DigitalOcean
-    3. Ask "Which region/location?" → suggest popular regions for chosen cloud
-       AWS: us-east-1 (Virginia), us-west-2 (Oregon), eu-west-1 (Ireland)
-       GCP: us-central1 (Iowa), us-east1 (S. Carolina), europe-west1 (Belgium)
-       Azure: eastus (Virginia), westus2 (Washington), westeurope (Netherlands)
-       DigitalOcean: nyc1, nyc3, sfo3, lon1, fra1
-    4. Use cloud-native terminology in all future responses
-
-STAGE 2 — Size & Resources
-  Collect: instance_count (1-100; suggest 2 for prod)
-           instance_type (cloud-specific: t3.micro for AWS, e2-micro for GCP, etc.)
-           ami_os (amazon-linux-2|ubuntu-22.04|ubuntu-20.04|rhel-9|windows-server-2022)
-  Strategy: Recommend type+count based on workload and cloud provider.
-           Use cloud-native terms ("EC2 instance" vs "Compute Engine instance" vs "Droplet")
-           Mention approximate hourly cost for transparency.
-
-STAGE 3 — Storage
-  Collect: storage_size_gb (8-16384; default 20)
-           storage_type (gp3|gp2|io2|st1; default gp3)
-  Strategy: "I'll use 20 GB gp3 encrypted — want to change?" Move fast.
-
-STAGE 4 — Networking & Security
-  Collect: ports (list of {port, protocol, source_cidr, description})
-           ssh_allowed_cidrs (REJECT 0.0.0.0/0)
-           load_balancer_type (application|network|none)
-  Auto-set: vpc_cidr="10.0.0.0/16", subnet_type="both", subnet_count=2, enable_public_ip=true
-  Strategy: Infer ports from workload (web→80,443; api→443; db→5432). Ask SSH CIDR explicitly.
-
-STAGE 5 — IAM Permissions
-  Collect: iam_services (dict: service → list of actions)
-           iam_role_name (auto-generate if not specified)
-  Always include baseline:
-    cloudwatch: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents, cloudwatch:PutMetricData]
-    ssm: [ssm:UpdateInstanceInformation, ssm:GetParameter]
-  Strategy: Infer from workload ("stores in S3" → s3 perms). Present inference, ask to confirm.
-  ⚠️ If user says "that's all" → STOP asking about IAM. Move to Stage 6.
-
-STAGE 6 — Monitoring & Extras
-  Collect: monitoring_enabled (bool; default true)
-           detailed_monitoring (bool; true for prod)
-           auto_scaling_enabled (bool; suggest true for prod multi-instance)
-           auto_scaling_config ({min, max, target_cpu} — only if enabled)
-           backup_enabled (bool)
-           log_retention_days (7|14|30|90|365)
-  Strategy: Batch 2-3 yes/no toggles in one question. Apply smart defaults by env.
-
-═══════════════════════════════════════════════════════════════
-RESPONSE FORMAT (strict JSON — every turn)
-═══════════════════════════════════════════════════════════════
-
-Return ONLY valid JSON. No markdown fences, no text outside JSON.
-
-{
-  "message": "<your friendly response — use **bold** and • bullets>",
-  "thinking": "<1-2 sentences: which stage, what's missing>",
-  "current_stage": <int 1-6>,
-  "extracted_params": {
-    // ONLY params extracted THIS turn. Exact key names from stages above.
-    // Dicts (like iam_services): emit only NEW keys — orchestrator deep-merges.
-    // Lists (like ports): emit FULL updated list each time.
-    // Booleans: true/false not strings. Numbers: numbers not strings.
-  },
-  "next_question": "<category hint>",
-  "is_complete": <bool — true ONLY when checklist passes>,
-  "suggestions": ["<up to 4 quick-reply options>"],
-  "aws_mcp_query": "<MCP command string or null>"
-}
-
-═══════════════════════════════════════════════════════════════
-COMPLETION CHECKLIST (is_complete=true ONLY when ALL present)
-═══════════════════════════════════════════════════════════════
-
-Required (non-null):
-  ☐ workload_type  ☐ workload_description  ☐ environment
-  ☐ instance_count  ☐ instance_type  ☐ region  ☐ ami_os
-  ☐ storage_size_gb  ☐ storage_type
-  ☐ ports (at least one)  ☐ ssh_allowed_cidrs (NOT 0.0.0.0/0)
-  ☐ iam_services (at minimum baseline cloudwatch+ssm)
-  ☐ monitoring_enabled
-
-
-When is_complete=true, calculate and show estimated monthly cost before summary:
-
-💵 COST ESTIMATION (CRITICAL - MUST SHOW):
-1. Calculate monthly cost based on cloud provider:
-
-   AWS Pricing:
-   - Compute: instance_type × instance_count × hourly_rate × 730 hours
-     Examples: t3.micro=$0.0104/hr, t3.small=$0.0208/hr, t3.medium=$0.0416/hr
-   - Storage: storage_size_gb × $0.10/GB/month (gp3) or $0.08/GB (gp2)
-   - Load Balancer: $16.20/month (ALB) or $22/month (NLB) if enabled
-   - Data transfer: First 100 GB free, then $0.09/GB
-
-   GCP Pricing:
-   - Compute: e2-micro=$0.008/hr, e2-small=$0.033/hr, e2-medium=$0.067/hr
-   - Storage: $0.17/GB/month (pd-standard), $0.10/GB (pd-balanced)
-   - Load Balancer: ~$18/month
-
-   Azure Pricing:
-   - Compute: B1s=$0.0104/hr, B2s=$0.0416/hr (similar to AWS)
-   - Storage: $0.05/GB/month (Standard HDD), $0.12/GB (Standard SSD)
-
-   DigitalOcean Pricing:
-   - Droplets: Basic droplets from $4/month (512MB), $6/month (1GB), $12/month (2GB)
-   - Storage: $0.10/GB/month
-
-2. Show detailed breakdown in this EXACT format:
-
-💵 **Estimated Monthly Cost: $XX.XX**
-
-**Breakdown:**
-• Compute: {instance_count} × {instance_type} × 730 hrs = **${compute_cost}**
-• Storage: {storage_size_gb} GB × ${storage_rate}/GB = **${storage_cost}**
-• Load Balancer: **${lb_cost}** (if enabled, else $0.00)
-• Data Transfer: ~**${transfer_cost}** (estimated 100 GB/month)
-
-**Total: ${total_cost}/month**
-
-3. Then show ✅ summary of ALL params grouped by stage.
-
-═══════════════════════════════════════════════════════════════
-FEW-SHOT EXAMPLES
-═══════════════════════════════════════════════════════════════
-
---- Turn 1 ---
-User: "I want to deploy a website"
-{
-  "message": "Awesome, let's get your website up and running! 🚀\\n\\nTo recommend the best setup, could you tell me a bit about it? For example:\\n• Is it a **static site** (HTML/CSS) or a **dynamic app** (Node.js, Python, PHP)?\\n• Is this for **production** (real users) or **development/testing**?",
-  "thinking": "Stage 1: Got workload_type=web_server. Need workload_description and environment.",
-  "current_stage": 1,
-  "extracted_params": {"workload_type": "web_server"},
-  "next_question": "workload_details",
-  "is_complete": false,
-  "suggestions": ["Static site (HTML/CSS)", "Node.js app", "Python/Django app", "It's for production"],
-  "aws_mcp_query": "list_instance_types web_server us-east-1"
-}
-
---- Turn 2 ---
-User: "It's a Node.js app for production, it stores files in S3"
-{
-  "message": "Great choice! A **production Node.js app with S3 storage** — I know exactly what you need.\\n\\nFor production I recommend **2 instances** across multiple availability zones (so if one goes down, the other keeps running). A **t3.small** (2 vCPU, 2 GB RAM, ~$15/mo each) handles moderate Node.js traffic well.\\n\\nDoes that sound right, or do you expect heavier traffic?",
-  "thinking": "Stage 1 done. Stage 2: inferred S3 IAM perms. Need to confirm instance_count, instance_type, region, ami_os.",
-  "current_stage": 2,
-  "extracted_params": {
-    "workload_description": "Node.js web app with S3 file uploads",
-    "environment": "prod",
-    "iam_services": {"s3": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"]}
-  },
-  "next_question": "instance_count_and_type",
-  "is_complete": false,
-  "suggestions": ["2 × t3.small sounds good", "I need larger instances", "Just 1 for now", "3+ for high traffic"],
-  "aws_mcp_query": "recommend web_server moderate us-east-1"
-}
-
---- Turn 3 ---
-User: "2 t3.small, us-east-1, Ubuntu"
-{
-  "message": "Perfect! **2 × t3.small** in **us-east-1** running **Ubuntu 22.04** 👍\\n\\nFor storage I'll set up a **20 GB gp3** encrypted volume (fast and cost-effective). Want to change the size or type, or are defaults fine?",
-  "thinking": "Stage 2 done. Stage 3: need storage confirmation.",
-  "current_stage": 3,
-  "extracted_params": {"instance_count": 2, "instance_type": "t3.small", "region": "us-east-1", "ami_os": "ubuntu-22.04"},
-  "next_question": "storage",
-  "is_complete": false,
-  "suggestions": ["Defaults are fine", "I need more storage", "Use io2 for high IOPS"],
-  "aws_mcp_query": "validate_instance_type t3.small us-east-1"
-}
-
---- Turn 4 ---
-User: "defaults are fine"
-{
-  "message": "Got it — **20 GB gp3 encrypted** ✅\\n\\nNow for security: your web app needs **ports 80** (HTTP) and **443** (HTTPS) open to the internet. I'll also set up SSH access — but only from YOUR IP for security.\\n\\n**What's your IP address or office/VPN range?** (e.g., 203.0.113.50/32)",
-  "thinking": "Stage 3 done. Stage 4: web→ports 80,443. Need SSH CIDR.",
-  "current_stage": 4,
-  "extracted_params": {"storage_size_gb": 20, "storage_type": "gp3"},
-  "next_question": "ssh_cidr",
-  "is_complete": false,
-  "suggestions": ["My IP is (I'll type it)", "Use 10.0.0.0/8 (VPN)", "I'll use SSM instead of SSH"],
-  "aws_mcp_query": null
-}
-
---- Turn 5 ---
-User: "203.0.113.50/32, and add a load balancer"
-{
-  "message": "I'll set up an **Application Load Balancer** distributing traffic to both instances with HTTP→HTTPS redirect 🔒\\n\\nSecurity groups:\\n• Ports **80 & 443** — open to internet\\n• Port **22 (SSH)** — only from **203.0.113.50/32**\\n\\nSince your app uses S3, I've already noted those permissions. Does it need access to any **other AWS services** — like RDS, DynamoDB, SQS, or Secrets Manager?",
-  "thinking": "Stage 4 done. Stage 5: have s3 perms. Ask about additional services.",
-  "current_stage": 5,
-  "extracted_params": {
-    "ssh_allowed_cidrs": ["203.0.113.50/32"],
-    "ports": [
-      {"port": 80, "protocol": "tcp", "source_cidr": "0.0.0.0/0", "description": "HTTP"},
-      {"port": 443, "protocol": "tcp", "source_cidr": "0.0.0.0/0", "description": "HTTPS"},
-      {"port": 22, "protocol": "tcp", "source_cidr": "203.0.113.50/32", "description": "SSH"}
-    ],
-    "load_balancer_type": "application",
-    "vpc_cidr": "10.0.0.0/16", "subnet_type": "both", "subnet_count": 2, "enable_public_ip": true
-  },
-  "next_question": "iam_additional",
-  "is_complete": false,
-  "suggestions": ["Also needs RDS", "Also uses SQS", "S3 is all it needs", "Add Secrets Manager"],
-  "aws_mcp_query": null
-}
-
---- Turn 6 ---
-User: "it talks to RDS, use Secrets Manager for creds. That's all for permissions"
-{
-  "message": "I'll create a custom IAM role **web-server-prod-role** with:\\n• **S3** — read/write uploads\\n• **RDS** — database authentication\\n• **Secrets Manager** — read DB credentials\\n• **CloudWatch** — logs & metrics (always included)\\n• **SSM** — instance management (always included)\\n\\nAlmost done! For production I recommend:\\n• ✅ Detailed CloudWatch monitoring\\n• ✅ Log retention: 30 days\\n• ✅ Auto-scaling (2–6 instances, target 70% CPU)\\n• ✅ EBS backup snapshots\\n\\nShall I enable all of these?",
-  "thinking": "Stage 5 done — user said 'that's all'. Stage 6: recommend prod defaults.",
-  "current_stage": 6,
-  "extracted_params": {
-    "iam_services": {
-      "rds": ["rds-db:connect"],
-      "secretsmanager": ["secretsmanager:GetSecretValue"],
-      "cloudwatch": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "cloudwatch:PutMetricData"],
-      "ssm": ["ssm:UpdateInstanceInformation", "ssm:GetParameter"]
-    },
-    "iam_role_name": "web-server-prod-role"
-  },
-  "next_question": "monitoring_extras",
-  "is_complete": false,
-  "suggestions": ["Enable all recommended", "Skip auto-scaling", "Customize", "Just monitoring"],
-  "aws_mcp_query": null
-}
-
---- Turn 7 ---
-User: "enable all"
-{
-  "message": "Excellent! Here's your complete setup:\\n\\n✅ **Workload**: Node.js web app with S3 uploads (production)\\n✅ **Compute**: 2 × t3.small in us-east-1, Ubuntu 22.04\\n✅ **Storage**: 20 GB gp3, encrypted\\n✅ **Network**: VPC 10.0.0.0/16, public + private subnets, 2 AZs\\n✅ **Load Balancer**: Application LB with HTTPS\\n✅ **Ports**: 80, 443 (public) · 22 (203.0.113.50/32 only)\\n✅ **IAM**: web-server-prod-role (S3, RDS, Secrets Manager, CloudWatch, SSM)\\n✅ **Monitoring**: Detailed CloudWatch + 30-day logs\\n✅ **Auto-Scaling**: 2–6 instances, 70% CPU target\\n✅ **Backup**: EBS snapshots enabled\\n✅ **Security**: IMDSv2 enforced, EBS encrypted, SSH restricted\\n\\n🚀 Ready to generate your Terraform files!",
-  "thinking": "All stages complete. Checklist passes.",
-  "current_stage": 6,
-  "extracted_params": {
-    "monitoring_enabled": true, "detailed_monitoring": true,
-    "cloudwatch_logs_enabled": true, "log_retention_days": 30,
-    "auto_scaling_enabled": true, "auto_scaling_config": {"min": 2, "max": 6, "target_cpu": 70},
-    "backup_enabled": true, "enable_imdsv2": true
-  },
-  "next_question": null,
-  "is_complete": true,
-  "suggestions": [],
-  "aws_mcp_query": null
-}
-
-═══════════════════════════════════════════════════════════════
-EDGE CASES
-═══════════════════════════════════════════════════════════════
-• "I don't know" → Pick best default, explain why, confirm.
-• Multiple params in one message → Extract ALL, skip ahead.
-• "0.0.0.0/0 for SSH" → REFUSE. Explain brute-force risk. Ask for specific CIDR.
-• User asks "what options" → Use MCP query (list_instance_types, list_regions).
-• "just use defaults" → Apply all defaults, show summary, set is_complete=true.
-• User goes back to change → Update param, acknowledge, continue.
-• User asks about AWS → Answer briefly, return to collection.
-"""
-
-    # ================================================================
-    # INIT
-    # ================================================================
-
     def __init__(self) -> None:
-        if not config.OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY not configured")
-        self.sessions: Dict[str, ConversationSession] = {}
-        self.openai_client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
-        
-        # MongoDB connection for session persistence
+        # MongoDB persistence (optional)
         try:
-            from pymongo import MongoClient
-            mongo_uri = config.MONGODB_URI
-            mongo_db = config.MONGODB_DATABASE
-            if mongo_uri and mongo_db:
-                client = MongoClient(mongo_uri)
-                db = client[mongo_db]
-                self.sessions_collection = db["sessions"]
+            from app.core.database import db_manager
+
+            if getattr(db_manager, "_client", None) is None:
+                try:
+                    db_manager.initialize()
+                except Exception:
+                    pass
+
+            try:
+                self.sessions_collection = db_manager.get_collection("sessions")
                 logger.info("ConversationManager initialized with MongoDB persistence")
-            else:
+            except Exception:
                 self.sessions_collection = None
-                logger.warning("MongoDB not configured - sessions will not persist")
+                logger.warning("MongoDB unavailable, sessions will not be persisted")
+
         except Exception as e:
-            logger.error(f"Failed to connect to MongoDB: {e}")
+            logger.error(f"Failed to initialize MongoDB connection: {e}")
             self.sessions_collection = None
-        
-        logger.info("ConversationManager initialised")
+
+        if self.sessions_collection is not None:
+            self._ensure_indexes()
+
+        # In-memory cache
+        self.sessions: Dict[str, ConversationSession] = {}
+
+        # Dependencies
+        self.github_service = get_github_service()
+        self.readme_analyzer = get_readme_analyzer()
+        self.llm_generator = LLMGenerator()
+
+        logger.info("ConversationManager initialized (README-driven, no forms)")
+
+    def _ensure_indexes(self) -> None:
+        try:
+            # TTL index for automatic cleanup after 30 days
+            self.sessions_collection.create_index(
+                "updated_at",
+                expireAfterSeconds=30 * 24 * 60 * 60,
+            )
+            # Ensure session_id is unique
+            self.sessions_collection.create_index("session_id", unique=True)
+            logger.info("Ensured indexes on sessions collection")
+        except Exception as e:
+            logger.error(f"Failed to create indexes: {e}")
 
     # ================================================================
     # SESSION MANAGEMENT
     # ================================================================
 
-    def create_session(self, provider: str = "aws") -> Dict[str, Any]:
+    def create_session(
+        self,
+        github_url: str,
+        provider: Optional[str] = None,
+        github_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a new session.
+
+        Provider is OPTIONAL - if not provided, bot will ask during chat.
+        """
+        provider = (provider or "").strip().lower() if provider else None
+        if provider and provider not in _ALLOWED_PROVIDERS:
+            raise ValueError(f"Invalid provider '{provider}'. Must be one of: {sorted(_ALLOWED_PROVIDERS)}")
+
         sid = f"sess_{datetime.now():%Y%m%d_%H%M%S}_{secrets.token_hex(4)}"
-        self.sessions[sid] = ConversationSession(
+
+        collected: Dict[str, Any] = {}
+        if provider:
+            collected["provider"] = provider
+        if github_token:
+            collected["github_token"] = github_token
+
+        session = ConversationSession(
             session_id=sid,
             provider=provider,
+            github_url=github_url,
             messages=[],
-            collected_parameters={},
+            collected_parameters=collected,
             is_complete=False,
             status=ConversationStatus.ACTIVE,
         )
-        
+
+        self.sessions[sid] = session
+
         # Persist to MongoDB
-        if self.sessions_collection:
+        if self.sessions_collection is not None:
             try:
-                self.sessions_collection.insert_one(self.sessions[sid].dict())
+                self.sessions_collection.insert_one(session.dict())
             except Exception as e:
                 logger.error(f"Failed to persist session {sid}: {e}")
-                
-        logger.info("Created session: %s", sid)
-        return {
-            "session_id": sid,
-            "bot_response": (
-                "Hey there! 👋 I'm your cloud infrastructure buddy. "
-                "I'll help you deploy to **AWS, GCP, Azure, or DigitalOcean** "
-                "— no cloud expertise needed!\n\n"
-                "**What would you like to deploy?** "
-                "(e.g., a website, an API, a database server, an application)"
-            ),
-            "suggestions": [
-                "A website",
-                "An API backend",
-                "A database server",
-                "A web application",
-                "You choose for me",
-            ],
-        }
+
+        logger.info(f"Created session: {sid} for repo: {github_url} (provider={provider or 'not set'})")
+
+        # Conditional bot message
+        if provider:
+            return {
+                "session_id": sid,
+                "bot_response": (
+                    "🚀 **README-Driven Deployment**\n\n"
+                    f"Repo: `{github_url}`\n"
+                    f"Provider: **{provider.upper()}**\n\n"
+                    "Next: fetch README → analyze → then I'll ask only what's missing for real-world Terraform."
+                ),
+                "suggestions": [],
+            }
+        else:
+            return {
+                "session_id": sid,
+                "bot_response": (
+                    "🚀 **README-Driven Deployment**\n\n"
+                    f"Repo: `{github_url}`\n\n"
+                    "I'll fetch and analyze your README, then ask a few questions to generate production-ready Terraform.\n\n"
+                    "**First: Which cloud provider?** (aws/gcp/azure/digitalocean)"
+                ),
+                "suggestions": ["aws", "gcp", "azure", "digitalocean"],
+            }
 
     def get_session(self, sid: str) -> Optional[ConversationSession]:
-        return self.sessions.get(sid)
+        # In-memory first
+        if sid in self.sessions:
+            return self.sessions[sid]
+
+        # MongoDB next
+        if self.sessions_collection is not None:
+            try:
+                doc = self.sessions_collection.find_one({"session_id": sid})
+                if doc:
+                    doc.pop("_id", None)
+                    session = ConversationSession(**doc)
+                    self.sessions[sid] = session
+                    logger.info(f"Loaded session {sid} from MongoDB")
+                    return session
+            except Exception as e:
+                logger.error(f"Failed to load session {sid}: {e}")
+
+        return None
 
     # ================================================================
-    # MESSAGE PROCESSING
+    # README ANALYSIS
     # ================================================================
 
-    async def process_message(
-        self, session_id: str, user_message: str
-    ) -> ChatMessageResponse:
+    async def analyze_readme(self, session_id: str) -> ChatMessageResponse:
         session = self.get_session(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
-        if session.status != ConversationStatus.ACTIVE:
-            raise ValueError(
-                f"Session {session_id} not active (status: {session.status})"
-            )
 
-        session.messages.append({"role": "user", "content": user_message})
-        raw = await self._call_llm(session)
+        github_token = session.collected_parameters.get("github_token")
 
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.error("LLM JSON parse failed: %s", raw[:300])
-            data = {
-                "message": "Sorry, could you rephrase that? I hit a hiccup 😅",
-                "extracted_params": {},
-                "suggestions": [],
-                "is_complete": False,
-            }
+        # 1) Fetch README
+        logger.info(f"Fetching README for {session.github_url}")
+        readme_data = await self.github_service.fetch_readme(session.github_url, github_token)
+        session.readme_content = readme_data["content"]
 
-        # Normalize field types
-        data.setdefault("message", "Could you tell me a bit more?")
-        data.setdefault("extracted_params", {})
-        data.setdefault("suggestions", [])
-        data.setdefault("is_complete", False)
-        if not isinstance(data["extracted_params"], dict):
-            data["extracted_params"] = {}
-        if not isinstance(data["suggestions"], list):
-            data["suggestions"] = []
+        # 2) Analyze README (should return terraform_hints aligned with generator prompt)
+        logger.info(f"Analyzing README ({len(readme_data['content'])} chars)")
+        analysis = await self.readme_analyzer.analyze(readme_data["content"], session.github_url)
+        session.readme_analysis = analysis
 
-        # Deep-merge extracted params
-        self._deep_merge(
-            session.collected_parameters, data["extracted_params"]
-        )
-        session.is_complete = bool(data["is_complete"])
+        # 3) Store context + hints (as context, not final)
+        tf_hints = analysis.get("terraform_hints") or {}
+        session.collected_parameters["terraform_hints"] = tf_hints
+        session.collected_parameters["readme_context"] = {
+            "repo_url": session.github_url,
+            "tech_stack": analysis.get("tech_stack", {}),
+            "dependencies": analysis.get("dependencies", []),
+            "deployment_hints": analysis.get("deployment_hints", []),
+            "environment_variables": analysis.get("environment_variables", []),
+            "ports": analysis.get("ports", []),
+        }
+
         session.updated_at = datetime.now()
+        self._save_session(session)
 
-        if session.is_complete:
-            self._apply_defaults(session.collected_parameters)
-            session.status = ConversationStatus.COMPLETE
-            
-            # Inject cost calculation into the message
-            cost_breakdown = self._calculate_cost(session.collected_parameters)
-            if cost_breakdown and "💰" not in data["message"]:
-                data["message"] = cost_breakdown + data["message"]
-            
-            logger.info(
-                "[%s] Complete – %d params",
-                session_id,
-                len(session.collected_parameters),
-            )
+        # Response summary
+        tech_stack = analysis.get("tech_stack", {})
+        confidence = float(analysis.get("confidence", 0.0) or 0.0)
+        ports = analysis.get("ports", [])
+        port_list = ", ".join(
+            str(p.get("port"))
+            for p in ports
+            if isinstance(p, dict) and p.get("port") is not None
+        ) or "8000"
 
-        session.messages.append(
-            {"role": "assistant", "content": data["message"]}
+        missing = self._missing_minimum_inputs(session)
+
+        summary_prompt = [
+            {"role": "system", "content": "You just analyzed the user's GitHub README. You are a Friendly Cloud Infrastructure Guide. Provide a warm, enthusiastic summary of what you found in their README (tech stack, dependencies, ports). Then ask ONE friendly, README-specific question to start the conversation. For example: 'I see you're using MongoDB on port 27017—would you like a managed database or should I keep it simple and run it on the same server?' Keep it conversational and suggest a default."}
+        ]
+        
+        chat_resp = await self.llm_generator.generate_chat_response(
+            messages=summary_prompt,
+            readme_analysis=session.readme_analysis,
+            collected_parameters=session.collected_parameters,
+            missing_fields=missing,
+            turn_count=session.turn_count,
+            topics_addressed=session.topics_addressed,
         )
         
-        # Update MongoDB
-        if self.sessions_collection:
-            try:
-                self.sessions_collection.update_one(
-                    {"session_id": session_id},
-                    {
-                        "$set": {
-                            "messages": session.messages,
-                            "collected_parameters": session.collected_parameters,
-                            "is_complete": session.is_complete,
-                            "status": session.status,
-                            "updated_at": session.updated_at
-                        }
-                    }
-                )
-            except Exception as e:
-                logger.error(f"Failed to update session {session_id}: {e}")
+        msg = chat_resp.get("bot_response", "Analysis complete!")
+        # 5) Finalize Response & History
+        msg = chat_resp.get("bot_response", "Analysis complete!")
+        session.messages.append(
+            {"role": "assistant", "content": msg, "timestamp": datetime.now().isoformat()}
+        )
+        session.turn_count += 1  # Analysis counts as a turn
+        session.updated_at = datetime.now()
+        self._save_session(session)
 
         return ChatMessageResponse(
             session_id=session_id,
-            bot_response=data["message"],
+            bot_response=msg,
             collected_parameters=session.collected_parameters,
-            is_complete=session.is_complete,
-            suggestions=data.get("suggestions", []),
-            next_question=data.get("next_question"),
+            is_complete=False,
+            suggestions=self._suggestions(session, missing),
+            readme_preview=(readme_data["content"][:500] + "...")
+            if len(readme_data["content"]) > 500
+            else readme_data["content"],
+            readme_analysis_summary={
+                "language": tech_stack.get("language", "unknown"),
+                "framework": tech_stack.get("framework", "unknown"),
+                "workload_type": analysis.get("workload_type", "other"),
+                "ports": ports,
+                "confidence": confidence,
+                "reasoning": analysis.get("reasoning", ""),
+            },
+            form_fields=None,
         )
 
     # ================================================================
-    # LLM CALL
+    # CHAT
     # ================================================================
 
-    async def _call_llm(self, session: ConversationSession) -> str:
-        snapshot = json.dumps(session.collected_parameters, indent=2)
-        context = (
-            f"\n\n[Collected so far: {snapshot}]\n"
-            f"[Provider: {session.provider.upper()}] "
-            f"[Turns: {len(session.messages)}]"
+    async def send_message(self, session_id: str, user_message: str) -> Dict[str, Any]:
+        session = self.get_session(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        # 1) Add user message to history & Increment turn
+        session.messages.append(
+            {"role": "user", "content": user_message, "timestamp": datetime.now().isoformat()}
+        )
+        session.turn_count += 1
+
+        # 2) Extract parameters (Fast-path Regex + LLM)
+        # We'll let the LLM do the heavy lifting in generate_chat_response,
+        # but keep regex for simple, unambiguous values.
+        extracted_regex = self._extract_parameters(user_message, session)
+        if extracted_regex:
+            session.collected_parameters.update(extracted_regex)
+
+        # 3) Identify what's missing
+        missing = self._missing_minimum_inputs(session)
+
+        # 4) Generate LLM-driven conversational response
+        # Increase history to 20 messages to prevent repetition
+        history = [{"role": m["role"], "content": m["content"]} for m in session.messages[-20:]]
+        
+        chat_resp = await self.llm_generator.generate_chat_response(
+            messages=history,
+            readme_analysis=session.readme_analysis or {},
+            collected_parameters=session.collected_parameters,
+            missing_fields=missing,
+            turn_count=session.turn_count,
+            topics_addressed=session.topics_addressed,
         )
 
-        messages = [
-            {"role": "system", "content": self.SYSTEM_PROMPT + context}
-        ]
-        for msg in session.messages:
-            if msg["role"] in ("user", "assistant"):
-                messages.append(
-                    {"role": msg["role"], "content": msg["content"]}
-                )
+        bot_msg = chat_resp.get("bot_response", "I'm processing your request.")
+        extracted_llm = chat_resp.get("extracted_parameters", {})
+        topic = chat_resp.get("topic_addressed")
+        
+        if topic and topic not in session.topics_addressed:
+            session.topics_addressed.append(topic)
+            
+        # Update session with LLM extracted parameters
+        if extracted_llm:
+            session.collected_parameters.update(extracted_llm)
+            # Re-check missing after LLM extraction
+            missing = self._missing_minimum_inputs(session)
 
-        try:
-            resp = await self.openai_client.chat.completions.create(
-                model=config.OPENAI_MODEL,
-                messages=messages,
-                temperature=0.15,
-                response_format={"type": "json_object"},
-                max_tokens=1200,
-            )
-            body = resp.choices[0].message.content
-            data = json.loads(body)
+        # 5) Check completion (Require depth!)
+        # Completion triggers ONLY if turn_count >= 12 AND minimum params are met.
+        if not missing and session.turn_count >= 12:
+            session.is_complete = True
+            session.status = ConversationStatus.COMPLETE
 
-            return json.dumps(data)
-        except json.JSONDecodeError as e:
-            logger.error("Failed to parse LLM JSON: %s", e)
-            return json.dumps({
-                "message": "Could you rephrase that? I couldn't understand.",
-                "extracted_params": {},
-                "suggestions": [],
-                "is_complete": False,
-                "current_stage": 1,
-            })
-        except Exception:
-            logger.exception("LLM call failed")
-            raise
+        # 6) Finalize bot response
+        session.messages.append(
+            {"role": "assistant", "content": bot_msg, "timestamp": datetime.now().isoformat()}
+        )
+
+        session.updated_at = datetime.now()
+        self._save_session(session)
+
+        return {
+            "session_id": session_id,
+            "bot_response": bot_msg,
+            "suggestions": self._suggestions(session, missing),
+            "collected_parameters": session.collected_parameters,
+            "is_complete": session.is_complete,
+        }
+
+    def _compose_bot_message(self, session: ConversationSession, missing: List[str]) -> str:
+        if session.readme_analysis is None:
+            return "Please run README analysis first: **GET /conversations/{session_id}/analyze**"
+
+        if not missing:
+            return "✅ All set. Reply **Generate Terraform** to create the Terraform files."
+
+        return f"I still need: **{missing[0]}**. Please share it."
+
+    def _suggestions(self, session: ConversationSession, missing: List[str]) -> List[str]:
+        if not missing:
+            return ["Generate Terraform", "Set to prod", "Set to dev", "Change region"]
+
+        m = missing[0].lower()
+        if "environment" in m or "mode" in m:
+            return ["dev", "staging", "prod"]
+        if "expected_users" in m:
+            return ["10", "100", "1000"]
+        if "region" in m or "location" in m:
+            return ["ap-south-1", "us-east-1", "eu-west-1", "us-central1", "westeurope"]
+        if "ssh_allowed_cidrs" in m:
+            return ["<your_ip>/32", "49.xx.xx.xx/32"]
+        if "gcp_project_id" in m:
+            return ["my-gcp-project-id"]
+        if "digitalocean auth" in m:
+            return ["I will set env vars", "Here is do_token: <token>"]
+        return []
 
     # ================================================================
-    # BUILD TERRAFORM REQUEST (conversation → LLMGenerator)
+    # REQUIRED MINIMUM INPUTS (LLM fills the rest)
+    # ================================================================
+
+    def _missing_minimum_inputs(self, session: ConversationSession) -> List[str]:
+        p = session.collected_parameters
+        provider = (p.get("provider") or session.provider or "").lower().strip()
+        missing: List[str] = []
+
+        # provider is required (should already exist, but keep safe)
+        if not provider or provider not in _ALLOWED_PROVIDERS:
+            missing.append("provider (aws/gcp/azure/digitalocean)")
+
+        # environment is required to apply dev vs prod defaults
+        env = (p.get("environment") or p.get("mode") or "").lower().strip()
+        if env not in _ALLOWED_ENVS:
+            missing.append("environment/mode (dev/staging/prod)")
+
+        # region/location is strongly recommended for real deployment (soft required)
+        if not p.get("region") and not p.get("location"):
+            missing.append("region/location (e.g., ap-south-1, us-east-1, us-central1, westeurope)")
+
+        # prod sizing signal
+        if env == "prod" and p.get("expected_users") is None:
+            missing.append("expected_users (rough number, e.g., 1000)")
+
+        # security: SSH CIDRs (never default to 0.0.0.0/0)
+        if p.get("ssh_allowed_cidrs") is None:
+            missing.append("ssh_allowed_cidrs (your IP in CIDR, e.g., 49.xx.xx.xx/32)")
+
+        # provider-specific hard requirements (only if you are NOT relying on env-based auth)
+        if provider == "gcp" and not p.get("gcp_project_id"):
+            missing.append("gcp_project_id (required for GCP)")
+        if provider == "digitalocean":
+            # Prefer env-based auth, but still prompt for how they will authenticate
+            if not p.get("do_token") and not p.get("do_auth_mode"):
+                missing.append("DigitalOcean auth (either provide do_token OR confirm you will use env vars)")
+
+        return missing
+
+    # ================================================================
+    # PARAM EXTRACTION (lightweight)
+    # ================================================================
+
+    def _extract_parameters(self, user_message: str, session: ConversationSession) -> Dict[str, Any]:
+        msg = (user_message or "").strip()
+        m = msg.lower()
+        out: Dict[str, Any] = {}
+
+        # provider
+        for prov in _ALLOWED_PROVIDERS:
+            if re.search(rf"\b{re.escape(prov)}\b", m):
+                out["provider"] = prov
+                session.provider = prov
+                break
+
+        # environment/mode
+        if "production" in m or re.search(r"\bprod\b", m):
+            out["environment"] = "prod"
+        elif "staging" in m or re.search(r"\bstage\b", m):
+            out["environment"] = "staging"
+        elif "development" in m or re.search(r"\bdev\b", m):
+            out["environment"] = "dev"
+
+        # expected users
+        users_match = re.search(r"(expected_users|users)\s*[:=]?\s*(\d+)", m)
+        if users_match:
+            out["expected_users"] = int(users_match.group(2))
+
+        # region/location patterns:
+        # AWS: ap-south-1, us-east-1
+        aws_region = re.search(r"\b([a-z]{2}-[a-z]+-\d)\b", m)
+        if aws_region:
+            reg = aws_region.group(1)
+            out["region"] = reg
+            # Infer provider if missing
+            if "provider" not in out and not session.provider:
+                out["provider"] = "aws"
+                session.provider = "aws"
+        # GCP: us-central1, asia-south1, europe-west1
+        gcp_loc = re.search(r"\b([a-z]+-[a-z]+[0-9])\b", m)
+        if gcp_loc:
+            reg = gcp_loc.group(1)
+            if "region" not in out:
+                out["location"] = reg
+            # Infer provider if missing
+            if "provider" not in out and not session.provider:
+                out["provider"] = "gcp"
+                session.provider = "gcp"
+
+        # Azure: westeurope, eastus, centralindia (loose)
+        azure_loc = re.search(r"\b(westeurope|northeurope|eastus|westus|centralindia|southeastasia)\b", m)
+        if azure_loc and "region" not in out and "location" not in out:
+            out["location"] = azure_loc.group(1)
+
+        # ssh cidrs (allow multiple)
+        cidrs = re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}\b", msg)
+        if cidrs:
+            out["ssh_allowed_cidrs"] = cidrs
+
+        # gcp_project_id
+        gcp_proj = re.search(r"(gcp_project_id|project_id)\s*[:=]\s*([a-z0-9\-]+)", m)
+        if gcp_proj:
+            out["gcp_project_id"] = gcp_proj.group(2)
+
+        # DigitalOcean auth
+        if re.search(r"\b(do_token|digitalocean_token)\b", m):
+            tok = re.search(r"(do_token|digitalocean_token)\s*[:=]\s*([A-Za-z0-9_\-\.]+)", msg)
+            if tok:
+                out["do_token"] = tok.group(2)
+        if "env var" in m or "environment variable" in m:
+            # user is indicating they will use env-based auth
+            out["do_auth_mode"] = "env"
+
+        return out
+
+    # ================================================================
+    # TERRAFORM REQUEST BUILDING (ALIGNED WITH TERRAFORM LLM PROMPT)
     # ================================================================
 
     def build_terraform_request(self, session_id: str) -> Dict[str, Any]:
-        """
-        Build structured dict that LLMGenerator.generate_terraform() expects.
-
-        Maps conversation param names → generator param names.
-        Called by main.py after conversation is complete.
-        """
         session = self.get_session(session_id)
         if not session or not session.is_complete:
             raise ValueError("Session not found or incomplete")
 
-        p = dict(session.collected_parameters)
+        p = session.collected_parameters
+        analysis = session.readme_analysis or {}
+        tf_hints = analysis.get("terraform_hints") or {}
 
-        return {
-            # ── Keys LLMGenerator._build_structured_prompt() reads ──
-            "terraform_resource_type": "aws_instance",
-            "resource_description": "EC2 instance",
-            "service_type": p.get("workload_type", "web_server"),
-            "cloud_provider": session.provider or "aws",
-            "environment": p.get("environment", "dev"),
-            "instance_count": p.get("instance_count", 1),
-            "instance_type": p.get("instance_type", "t3.micro"),
-            "region": p.get("region", "us-east-1"),
-            "os_image": p.get("ami_os", "ubuntu-22.04"),
-            "storage_size": p.get("storage_size_gb", 20),
-            "storage_type": p.get("storage_type", "gp3"),
-            "database_type": "none",
-            # ── Rich context for better Terraform generation ──
-            "workload_description": p.get("workload_description", ""),
-            "vpc_cidr": p.get("vpc_cidr", "10.0.0.0/16"),
-            "subnet_type": p.get("subnet_type", "both"),
-            "subnet_count": p.get("subnet_count", 2),
-            "enable_public_ip": p.get("enable_public_ip", True),
-            "ports": p.get("ports", []),
-            "ssh_allowed_cidrs": p.get("ssh_allowed_cidrs", []),
-            "load_balancer_type": p.get("load_balancer_type", "none"),
-            "enable_https": p.get("enable_https", False),
-            "iam_services": p.get("iam_services", {}),
-            "iam_role_name": p.get("iam_role_name", ""),
-            "monitoring_enabled": p.get("monitoring_enabled", True),
-            "detailed_monitoring": p.get("detailed_monitoring", False),
-            "cloudwatch_logs_enabled": p.get(
-                "cloudwatch_logs_enabled", True
-            ),
-            "log_retention_days": p.get("log_retention_days", 30),
-            "auto_scaling_enabled": p.get("auto_scaling_enabled", False),
-            "auto_scaling_config": p.get("auto_scaling_config"),
-            "backup_enabled": p.get("backup_enabled", False),
-            "enable_imdsv2": p.get("enable_imdsv2", True),
-            "storage_encrypted": p.get("storage_encrypted", True),
+        provider = (p.get("provider") or session.provider or "").lower().strip()
+        if provider not in _ALLOWED_PROVIDERS:
+            raise ValueError(f"Invalid/missing provider in session: {provider}")
+
+        # Hints expected from analyzer:
+        networking = tf_hints.get("networking") or {
+            "mode": "create",
+            "subnets": {"public": True, "private": False},
+            "nat_gateway": False,
+        }
+        resources = tf_hints.get("resources") or []
+
+        # Apply user overrides
+        if isinstance(p.get("networking"), dict):
+            networking.update(p["networking"])
+        if isinstance(p.get("resources"), list):
+            resources = p["resources"]
+
+        # Security defaults (NEVER allow 0.0.0.0/0 for SSH in generator)
+        ssh_allowed_cidrs = p.get("ssh_allowed_cidrs") or ["127.0.0.1/32"]
+
+        # Attach SSH CIDRs to compute resources if not present
+        for r in resources:
+            if isinstance(r, dict) and (r.get("type") or "").lower() == "compute":
+                r.setdefault("ssh_allowed_cidrs", ssh_allowed_cidrs)
+
+        env = (p.get("environment") or p.get("mode") or "dev").lower().strip()
+        if env not in _ALLOWED_ENVS:
+            env = "dev"
+
+        expected_users = p.get("expected_users")
+        if expected_users is None:
+            expected_users = analysis.get("expected_users_hint") or 10
+
+        req: Dict[str, Any] = {
+            "provider": provider,
+            # region/location: keep both; provider-specific generator decides
+            "region": p.get("region"),
+            "location": p.get("location"),
+            "environment": env,
+            "expected_users": int(expected_users),
+            "traffic_level": p.get("traffic_level", "low"),
+            "availability": p.get("availability", "single_zone"),
+            "project_name": p.get("project_name") or self._infer_project_name(session.github_url),
+            "workload_description": analysis.get("reasoning") or f"Infrastructure for {session.github_url}",
+            "networking": networking,   # ✅ networking handled, LB removed upstream per your requirement
+            "resources": resources,
+            "encryption": p.get("encryption", True),
+            "public_exposure": p.get("public_exposure", None),
+            "ssh_allowed_cidrs": ssh_allowed_cidrs,
+            "readme_context": p.get("readme_context") or {
+                "repo_url": session.github_url,
+                "tech_stack": analysis.get("tech_stack", {}),
+                "dependencies": analysis.get("dependencies", []),
+                "deployment_hints": analysis.get("deployment_hints", []),
+                "environment_variables": analysis.get("environment_variables", []),
+                "ports": analysis.get("ports", []),
+            },
         }
 
-    # ================================================================
-    # HELPERS
-    # ================================================================
+        # Provider mandatory inputs (pass-through)
+        if provider == "gcp":
+            req["gcp_project_id"] = p.get("gcp_project_id")
+        if provider == "digitalocean":
+            # Prefer env-based auth; token optional if they choose env mode
+            req["do_token"] = p.get("do_token")
+            req["do_auth_mode"] = p.get("do_auth_mode", None)
 
-    @staticmethod
-    def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> None:
-        """Recursively merge overlay into base in place."""
-        for key, value in overlay.items():
-            if (
-                key in base
-                and isinstance(base[key], dict)
-                and isinstance(value, dict)
-            ):
-                ConversationManager._deep_merge(base[key], value)
-            else:
-                base[key] = value
+        return req
 
-    @staticmethod
-    def _apply_defaults(params: Dict[str, Any]) -> None:
-        """Fill missing params with secure, environment-aware defaults."""
-        is_prod = params.get("environment") == "prod"
-        multi = params.get("instance_count", 1) > 1
-
-        defaults: Dict[str, Any] = {
-            "vpc_cidr": "10.0.0.0/16",
-            "subnet_type": "both",
-            "subnet_count": 2,
-            "enable_public_ip": True,
-            "storage_encrypted": True,
-            "storage_size_gb": 20,
-            "storage_type": "gp3",
-            "load_balancer_type": (
-                "application" if is_prod and multi else "none"
-            ),
-            "enable_https": is_prod and multi,
-            "detailed_monitoring": is_prod,
-            "cloudwatch_logs_enabled": True,
-            "log_retention_days": 30,
-            "monitoring_enabled": True,
-            "auto_scaling_enabled": False,
-            "backup_enabled": False,
-            "enable_imdsv2": True,
-        }
-        for key, value in defaults.items():
-            params.setdefault(key, value)
-
-        # Ensure baseline IAM services always present
-        iam = params.setdefault("iam_services", {})
-        iam.setdefault(
-            "cloudwatch",
-            [
-                "logs:CreateLogGroup",
-                "logs:CreateLogStream",
-                "logs:PutLogEvents",
-                "cloudwatch:PutMetricData",
-            ],
-        )
-        iam.setdefault(
-            "ssm",
-            [
-                "ssm:UpdateInstanceInformation",
-                "ssm:GetParameter",
-            ],
-        )
+    def _infer_project_name(self, github_url: str) -> str:
+        try:
+            parts = github_url.rstrip("/").split("/")
+            repo = parts[-1].replace(".git", "")
+            repo = re.sub(r"[^a-zA-Z0-9\-]", "-", repo).strip("-").lower()
+            return repo or "app"
+        except Exception:
+            return "app"
 
     # ================================================================
-    # PARAMETER RETRIEVAL
+    # PERSISTENCE + LISTING
     # ================================================================
+
+    def _save_session(self, session: ConversationSession) -> None:
+        if self.sessions_collection is not None:
+            try:
+                self.sessions_collection.update_one(
+                    {"session_id": session.session_id},
+                    {"$set": session.dict()},
+                    upsert=True,
+                )
+            except Exception as e:
+                logger.error(f"Failed to save session: {e}")
+
+    def list_sessions(self, limit: int = 20) -> List[Dict[str, Any]]:
+        if self.sessions_collection is None:
+            sessions_list: List[Dict[str, Any]] = []
+            for sid, session in list(self.sessions.items())[:limit]:
+                sessions_list.append(
+                    {
+                        "session_id": sid,
+                        "title": session.github_url or "New Session",
+                        "provider": session.provider,
+                        "updated_at": session.updated_at.isoformat()
+                        if getattr(session, "updated_at", None)
+                        else datetime.now().isoformat(),
+                        "is_complete": session.is_complete,
+                    }
+                )
+            return sessions_list
+
+        try:
+            cursor = self.sessions_collection.find().sort("updated_at", -1).limit(limit)
+            sessions_list: List[Dict[str, Any]] = []
+            for doc in cursor:
+                sessions_list.append(
+                    {
+                        "session_id": doc.get("session_id"),
+                        "title": doc.get("github_url", "New Session"),
+                        "provider": doc.get("provider", "unknown"),
+                        "updated_at": doc.get("updated_at", datetime.now()).isoformat(),
+                        "is_complete": doc.get("is_complete", False),
+                    }
+                )
+            return sessions_list
+        except Exception as e:
+            logger.error(f"Failed to list sessions: {e}")
+            return []
+
+    def delete_session(self, session_id: str) -> bool:
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+
+        if self.sessions_collection is not None:
+            try:
+                result = self.sessions_collection.delete_one({"session_id": session_id})
+                return result.deleted_count > 0
+            except Exception as e:
+                logger.error(f"Failed to delete session: {e}")
+                return False
+
+        return True
+
+    def add_run_to_session(self, session_id: str, run_id: str) -> None:
+        session = self.get_session(session_id)
+        if session:
+            if not getattr(session, "run_ids", None):
+                session.run_ids = []
+            session.run_ids.append(run_id)
+            session.updated_at = datetime.now()
+            self._save_session(session)
 
     def get_collected_parameters(self, session_id: str) -> Dict[str, Any]:
         session = self.get_session(session_id)
@@ -676,169 +668,3 @@ EDGE CASES
     def is_session_complete(self, session_id: str) -> bool:
         session = self.get_session(session_id)
         return session.is_complete if session else False
-
-    # ================================================================
-    # COST CALCULATION
-    # ================================================================
-
-    def _calculate_cost(self, params: dict) -> str:
-        """Calculate estimated monthly cost and return formatted string."""
-        try:
-            instance_count = params.get("instance_count", 1)
-            instance_type = params.get("instance_type", "t3.micro")
-            storage_size = params.get("storage_size_gb", 20)
-            storage_type = params.get("storage_type", "gp3")
-            lb_type = params.get("load_balancer_type", "none")
-            
-            # AWS pricing (simplified)
-            instance_prices = {
-                "t3.micro": 0.0104, "t3.small": 0.0208, "t3.medium": 0.0416,
-                "t3.large": 0.0832, "t3.xlarge": 0.1664,
-                "t2.micro": 0.0116, "t2.small": 0.023, "t2.medium": 0.0464,
-            }
-            storage_prices = {"gp3": 0.08, "gp2": 0.10, "io2": 0.125}
-            lb_prices = {"application": 16.20, "network": 22.00, "none": 0.00}
-            
-            hourly_rate = instance_prices.get(instance_type, 0.02)
-            storage_rate = storage_prices.get(storage_type, 0.08)
-            lb_cost = lb_prices.get(lb_type, 0.00)
-            
-            compute_cost = instance_count * hourly_rate * 730
-            storage_cost = storage_size * storage_rate
-            total_cost = compute_cost + storage_cost + lb_cost
-            
-            cost_breakdown = f"""
-💰 **Estimated Monthly Cost: ${total_cost:.2f}**
-
-**Breakdown:**
-• Compute: {instance_count} × {instance_type} × 730 hrs = **${compute_cost:.2f}**
-• Storage: {storage_size} GB {storage_type} = **${storage_cost:.2f}**
-• Load Balancer: **${lb_cost:.2f}**
-
-**Total: ~${total_cost:.2f}/month**
-
-*Actual costs may vary based on usage, region, and data transfer.*
-
----
-
-"""
-            return cost_breakdown
-        except Exception as e:
-            logger.error(f"Cost calculation failed: {e}")
-            return ""
-
-    # ================================================================
-    # SESSION LISTING & DELETION
-    # ================================================================
-
-    def list_sessions(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """List recent sessions for the sidebar history."""
-        if not self.sessions_collection:
-            # Fallback to in-memory sessions
-            sessions_list = []
-            for sid, session in list(self.sessions.items())[:limit]:
-                title = "New Conversation"
-                if session.messages:
-                    for msg in session.messages:
-                        if msg.get("role") == "user":
-                            content = msg.get("content", "")
-                            title = (content[:30] + "...") if len(content) > 30 else content
-                            break
-                
-                sessions_list.append({
-                    "session_id": sid,
-                    "title": title,
-                    "workload_type": session.collected_parameters.get("workload_type", ""),
-                    "provider": session.provider,
-                    "updated_at": datetime.now().isoformat(),
-                    "created_at": datetime.now().isoformat()
-                })
-            return sessions_list
-        
-        try:
-            cursor = self.sessions_collection.find(
-                {}, 
-                {"session_id": 1, "messages": 1, "collected_parameters": 1, "provider": 1, "updated_at": 1, "created_at": 1}
-            ).sort("updated_at", -1).limit(limit)
-            
-            sessions = []
-            for doc in cursor:
-                params = doc.get("collected_parameters", {})
-                created = doc.get("created_at")
-                
-                # Build descriptive title
-                workload = params.get("workload_description", "")
-                workload_type = params.get("workload_type", "")
-                provider = params.get("cloud_provider") or doc.get("provider", "")
-                
-                if workload:
-                    title = workload[:40] + "..." if len(workload) > 40 else workload
-                elif workload_type:
-                    title = workload_type.replace("_", " ").title()
-                else:
-                    messages = doc.get("messages", [])
-                    for msg in messages:
-                        if msg.get("role") == "user":
-                            content = msg.get("content", "")
-                            title = (content[:30] + "...") if len(content) > 30 else content
-                            break
-                    else:
-                        title = "New Conversation"
-                
-                if provider:
-                    title = f"{title} ({provider.upper()})"
-                
-                if created:
-                    date_str = created.strftime("%b %d")
-                    title = f"{title} - {date_str}"
-                
-                sessions.append({
-                    "session_id": doc["session_id"],
-                    "title": title,
-                    "updated_at": doc.get("updated_at", doc.get("created_at")).isoformat(),
-                    "created_at": doc.get("created_at").isoformat(),
-                    "workload_type": workload_type,
-                    "provider": provider
-                })
-            return sessions
-        except Exception as e:
-            logger.error(f"Failed to list sessions: {e}")
-            return []
-
-    def delete_session(self, session_id: str) -> bool:
-        """Delete a session from storage."""
-        # Remove from in-memory
-        if session_id in self.sessions:
-            del self.sessions[session_id]
-        
-        # Remove from MongoDB if available
-        if self.sessions_collection:
-            try:
-                result = self.sessions_collection.delete_one({"session_id": session_id})
-                return result.deleted_count > 0
-            except Exception as e:
-                logger.error(f"Failed to delete session {session_id}: {e}")
-                return False
-        return True
-
-    def add_run_to_session(self, session_id: str, run_id: str) -> None:
-        """Link a run ID to a session."""
-        session = self.get_session(session_id)
-        if session:
-            if not hasattr(session, "run_ids"):
-                session.run_ids = []
-            session.run_ids.append(run_id)
-            session.updated_at = datetime.now()
-            
-            # Update MongoDB
-            if self.sessions_collection:
-                try:
-                    self.sessions_collection.update_one(
-                        {"session_id": session_id},
-                        {
-                            "$addToSet": {"run_ids": run_id},
-                            "$set": {"updated_at": session.updated_at}
-                        }
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to update session with run_id: {e}")

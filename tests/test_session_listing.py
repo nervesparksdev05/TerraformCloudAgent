@@ -54,10 +54,11 @@ def test_list_sessions(conversation_manager, mock_db_manager):
     
     # Verify
     assert len(sessions) == 2
+    expected_date = now.strftime("%b %d")
     assert sessions[0]["session_id"] == "sess_1"
-    assert sessions[0]["title"] == "I want a web server"
+    assert sessions[0]["title"] == f"I want a web server - {expected_date}"
     assert sessions[1]["session_id"] == "sess_2"
-    assert sessions[1]["title"] == "Deploy DB"
+    assert sessions[1]["title"] == f"Deploy DB - {expected_date}"
     
     # Verify DB call
     mock_collection.find.assert_called_once()
