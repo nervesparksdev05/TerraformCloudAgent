@@ -1,5 +1,7 @@
+# streamlit/api_client.py ✅ UPDATED (no provider at all)
+
 import requests
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 
 class TerraformAPIClient:
@@ -14,36 +16,41 @@ class TerraformAPIClient:
     # CONVERSATION ENDPOINTS
     # ========================================================================
 
-    def create_conversation(self, provider: str = "aws", github_url: str = "", github_token: str = "", github_branch: str = "") -> Dict[str, Any]:
-        params = {"provider": provider}
-        if github_url:
-            params["github_url"] = github_url
+    def create_conversation(
+        self,
+        owner: str,
+        repo: str,
+        github_token: str = "",
+        github_branch: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Starts a conversation session.
+        README is fetched via GitHub API using owner+repo.
+        Provider selection happens inside the chat.
+        """
+        params: Dict[str, Any] = {
+            "owner": owner,
+            "repo": repo,
+        }
         if github_token:
             params["github_token"] = github_token
         if github_branch:
             params["github_branch"] = github_branch
-            
-        response = self.session.post(
-            f"{self.base_url}/conversations",
-            params=params
-        )
-        response.raise_for_status()
 
+        response = self.session.post(f"{self.base_url}/conversations", params=params)
+        response.raise_for_status()
         data = response.json()
 
         session_id = data.get("session_id")
         print(f"[CONVERSATION] Created session_id: {session_id}")
-        
-
         return data
 
     def send_message(self, session_id: str, message: str) -> Dict[str, Any]:
         response = self.session.post(
             f"{self.base_url}/conversations/{session_id}/message",
-            json={"message": message}
+            json={"message": message},
         )
         response.raise_for_status()
-
         data = response.json()
         print(f"[CONVERSATION] Message sent to session_id: {session_id}")
         return data
@@ -51,30 +58,21 @@ class TerraformAPIClient:
     def get_conversation(self, session_id: str) -> Dict[str, Any]:
         response = self.session.get(f"{self.base_url}/conversations/{session_id}")
         response.raise_for_status()
-
         data = response.json()
         print(f"[CONVERSATION] Fetched state for session_id: {session_id}")
         return data
 
     def generate_terraform(self, session_id: str) -> Dict[str, Any]:
-        response = self.session.post(
-            f"{self.base_url}/conversations/{session_id}/generate"
-        )
+        response = self.session.post(f"{self.base_url}/conversations/{session_id}/generate")
         response.raise_for_status()
-
         data = response.json()
-
         run_id = data.get("run_id")
         print(f"[RUN] Created run_id: {run_id} (from session_id: {session_id})")
         return data
 
-    def get_sessions(self, limit: int = 20):
-        """List recent chat sessions."""
+    def get_sessions(self, limit: int = 20) -> List[Dict[str, Any]]:
         try:
-            response = self.session.get(
-                f"{self.base_url}/sessions",
-                params={"limit": limit}
-            )
+            response = self.session.get(f"{self.base_url}/sessions", params={"limit": limit})
             if response.status_code == 200:
                 return response.json()
             return []
@@ -83,7 +81,6 @@ class TerraformAPIClient:
             return []
 
     def delete_session(self, session_id: str) -> bool:
-        """Delete a chat session."""
         try:
             response = self.session.delete(f"{self.base_url}/sessions/{session_id}")
             response.raise_for_status()
@@ -100,7 +97,6 @@ class TerraformAPIClient:
     def get_run(self, run_id: str) -> Dict[str, Any]:
         response = self.session.get(f"{self.base_url}/runs/{run_id}")
         response.raise_for_status()
-
         data = response.json()
         print(f"[RUN] Status fetched for run_id: {run_id}")
         return data
@@ -108,7 +104,6 @@ class TerraformAPIClient:
     def get_run_files(self, run_id: str) -> Dict[str, Any]:
         response = self.session.get(f"{self.base_url}/runs/{run_id}/files")
         response.raise_for_status()
-
         data = response.json()
         print(f"[RUN] Files fetched for run_id: {run_id}")
         return data
@@ -116,7 +111,6 @@ class TerraformAPIClient:
     def approve_run(self, run_id: str) -> Dict[str, Any]:
         response = self.session.post(f"{self.base_url}/runs/{run_id}/approve")
         response.raise_for_status()
-
         data = response.json()
         print(f"[RUN] Approved run_id: {run_id}")
         return data
@@ -124,7 +118,6 @@ class TerraformAPIClient:
     def reject_run(self, run_id: str) -> Dict[str, Any]:
         response = self.session.post(f"{self.base_url}/runs/{run_id}/reject")
         response.raise_for_status()
-
         data = response.json()
         print(f"[RUN] Rejected run_id: {run_id}")
         return data
@@ -132,29 +125,20 @@ class TerraformAPIClient:
     def destroy_run(self, run_id: str) -> Dict[str, Any]:
         response = self.session.post(f"{self.base_url}/runs/{run_id}/destroy")
         response.raise_for_status()
-
         data = response.json()
         print(f"[RUN] Destroy requested for run_id: {run_id}")
         return data
 
     def edit_run_message(self, run_id: str, message: str) -> Dict[str, Any]:
-        response = self.session.post(
-            f"{self.base_url}/runs/{run_id}/edit",
-            json={"message": message}
-        )
+        response = self.session.post(f"{self.base_url}/runs/{run_id}/edit", json={"message": message})
         response.raise_for_status()
-
         data = response.json()
         print(f"[RUN] Edit requested for run_id: {run_id}")
         return data
 
     def chat_about_run(self, run_id: str, message: str) -> Dict[str, Any]:
-        response = self.session.post(
-            f"{self.base_url}/runs/{run_id}/chat",
-            json={"message": message}
-        )
+        response = self.session.post(f"{self.base_url}/runs/{run_id}/chat", json={"message": message})
         response.raise_for_status()
-
         data = response.json()
         print(f"[RUN] Chat message sent for run_id: {run_id}")
         return data

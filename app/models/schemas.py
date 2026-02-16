@@ -55,6 +55,7 @@ class TerraformBundle(BaseModel):
     main_tf: str = Field(..., description="Main Terraform configuration (main.tf)")
     variables_tf: str = Field(..., description="Variables definition (variables.tf)")
     outputs_tf: str = Field(..., description="Outputs definition (outputs.tf)")
+    github_workflow_yaml: Optional[str] = Field(None, description="Generated GitHub Actions workflow (deploy.yml)")
 
     class Config:
         json_schema_extra = {

@@ -1,12 +1,15 @@
-"""LLM Terraform Generator — Uses rich conversation params for production EC2 code."""
+"""LLM Terraform Generator — Uses rich conversation params for production infrastructure code."""
 from __future__ import annotations
 
 import json
 from typing import Any, Dict
 
-from app.services.llm_service import LLMService
+import subprocess
+import tempfile
+import os
+from pathlib import Path
 
-from app.core import config
+from app.services.llm_service import LLMService
 from app.core.logger import get_logger
 from app.models.schemas import TerraformBundle
 
@@ -14,321 +17,331 @@ logger = get_logger(__name__)
 
 
 class LLMGenerator:
-    """Generate production-grade Terraform code from structured conversation parameters.
-    
-    Supports: AWS EC2, GCP Compute Engine, Azure VMs, DigitalOcean Droplets.
+    """
+    Generate production-grade Terraform code from structured conversation parameters.
+
+    Supports: AWS EC2, GCP Compute Engine, Azure Virtual Machines, DigitalOcean Droplets.
     """
 
-    SYSTEM_PROMPT = """\
-You are an expert Terraform code generator for multi-cloud infrastructure (AWS, GCP, Azure, DigitalOcean).
+    # -----------------------------
+    # Shared output contract
+    # -----------------------------
+    BASE_SYSTEM_PROMPT = """\
+You are a **Principal Cloud Architect** and **Terraform Expert**.
+Your goal is to generate **World-Class, Production-Grade** Terraform code.
+The user has complained about "bullshit" code before — DO NOT disappoint them.
 
-OUTPUT FORMAT — Return ONLY valid JSON with exactly these 3 keys:
-{
-  "main_tf": "complete main.tf HCL content with \\n newlines",
-  "variables_tf": "complete variables.tf HCL content with \\n newlines",
-  "outputs_tf": "complete outputs.tf HCL content with \\n newlines"
-}
+### 🎯 STANDARDS OF EXCELLENCE:
+1.  **Strict Variable Usage**: NEVER hardcode values (CIDRs, instance types, regions, AMIs). define them in `variables.tf`.
+2.  **Professional Naming**: Use clean, consistent naming conventions (e.g., `aws_s3_bucket.app_logs` vs `aws_s3_bucket.b1`).
+3.  **Security First**:
+    -   No open security groups (0.0.0.0/0) for SSH/RDP.
+    -   Databases MUST be in private subnets.
+    -   Encryption enabled everywhere (EBS, S3, RDS).
+4.  **Complete Solutions**: Do not output "skeleton" code. Generate the FULL working infrastructure.
+5.  **Smart Defaults**: If a value isn't provided, pick a sensible, cost-effective default and document it.
 
-FORMATTING (CRITICAL):
-- Each HCL block on separate lines using \\n
-- 2-space indentation per nesting level
-- Blank line (\\n\\n) between resource blocks
-- Properly escaped quotes: \\"
+### 🛡️ SPECIFIC REQUIREMENTS:
+-   **Compute**: Use `t3.micro` (AWS) / `e2-micro` (GCP) for Dev, but allow overrides via variables.
+-   **Structure**:
+    -   `main.tf`: Core infrastructure (VPC, Instances, LBs, SGs).
+    -   `variables.tf`: clearly defined variables with `description` and `default`.
+    -   `outputs.tf`: useful outputs (IPs, URLs, connection strings).
+-   **User Data**: You MUST include a `user_data` script that *actually* tries to install the app provided in the README.
 
-═══════════════════════════════════════════════════════════════
-REQUIRED BLOCKS IN main.tf (IN THIS ORDER)
-═══════════════════════════════════════════════════════════════
+### 📝 RULES:
+-   **Output ONLY valid JSON** with keys: `main_tf`, `variables_tf`, `outputs_tf`.
+-   **No Markdown**: Do not wrap in ```json ... ```.
+-   **Comments**: Heavily comment complex sections. Explain *why* you chose a specific resource.
 
-1. TERRAFORM & PROVIDER BLOCKS (always include):
-terraform {
-  required_version = ">= 1.5"
-  required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 5.0" }
-    tls = { source = "hashicorp/tls", version = "~> 4.0" }
-  }
-}
+### 🧩 INPUT CONTEXT:
+"""
 
-provider "aws" {
-  region = var.aws_region
-  default_tags {
-    tags = {
-      Environment = var.environment
-      Project     = var.project_name
-      ManagedBy   = "terraform"
-    }
-  }
-}
+    README_BRIDGE_PROMPT = """\
+README-FIRST BEHAVIOR (MANDATORY):
+- The README is your PRIMARY source of truth. Every Terraform resource must be justified by the project's actual needs.
+- Treat workload_description, language, dependencies, ports, database_type, and has_docker as critical inputs.
+- If the README mentions Docker/docker-compose, generate user_data that uses Docker for deployment.
+- If the README mentions a database, provision the appropriate managed database service OR configure the instance with enough storage.
+- User inputs may be blunt or short; infer sensible defaults instead of dropping required resources.
+- Prefer secure, beginner-safe defaults while preserving production readiness.
+- Keep generated Terraform understandable for non-cloud users with concise resource names and tags.
+- Include a comprehensive user_data/startup script that actually deploys the application from the GitHub repo.
+- The generated Terraform should be a COMPLETE, WORKING deployment — not just infrastructure scaffolding.
+"""
 
-2. DATA SOURCES (always include these):
-# Find latest AMI
-data "aws_ami" "selected" {
-  most_recent = true
-  owners      = ["099720109477"]  # Canonical for Ubuntu, "amazon" for Amazon Linux
+    # -----------------------------
+    # Provider-specific templates
+    # -----------------------------
+    AWS_TEMPLATE = """\
+PROVIDER TARGET: AWS
 
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]  # Adjust based on ami_os param
-  }
+REQUIRED IN main.tf (IN THIS ORDER):
+1) terraform + required_providers (aws,tls)
+2) provider "aws" using var.aws_region and default_tags
+3) data sources:
+   - data "aws_ami" "selected" (NO hardcoded AMI IDs)
+   - data "aws_availability_zones" "available"
+   - data "aws_iam_policy_document" "instance_assume_role"
+   - data "aws_iam_policy_document" "instance_policy" (CloudWatch + SSM always, plus user's iam_services)
+4) tls_private_key + aws_key_pair
+5) VPC + public subnets + IGW + route table + associations (use var.vpc_cidr, var.subnet_count)
+6) security group:
+   - ingress for app ports from ports param (HTTP/HTTPS default if none)
+   - ingress SSH only from var.ssh_allowed_cidrs (never 0.0.0.0/0)
+7) IAM role + inline policy + instance profile
+8) aws_instance "main" with:
+   - root_block_device (encrypted=true, size/type vars)
+   - metadata_options (IMDSv2 required)
+9) Optional load balancer if var.load_balancer_type != "none"
 
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-}
+VARIABLES.TF MUST INCLUDE:
+- aws_region, environment, project_name
+- instance_type, instance_count
+- storage_size_gb, storage_type
+- vpc_cidr, subnet_count
+- ssh_allowed_cidrs (list(string))
+- ports (list(object({port=number, protocol=string, source_cidr=string, description=string})))
+- load_balancer_type (string)
 
-# Get available AZs
-data "aws_availability_zones" "available" {
-  state = "available"
-}
+OUTPUTS.TF MUST INCLUDE:
+- instance_ids, public_ips, private_ips
+- ssh_private_key (sensitive)
+- vpc_id, security_group_id, iam_role_arn
+"""
 
-# IAM policy document for instance role
-data "aws_iam_policy_document" "instance_assume_role" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["ec2.amazonaws.com"]
-    }
-  }
-}
+    GCP_TEMPLATE = """\
+PROVIDER TARGET: GCP
 
-# IAM policy for instance permissions
-data "aws_iam_policy_document" "instance_policy" {
-  # CloudWatch logs (always include)
-  statement {
-    actions = [
-      "logs:CreateLogGroup",
-      "logs:CreateLogStream",
-      "logs:PutLogEvents",
-      "cloudwatch:PutMetricData"
-    ]
-    resources = ["*"]
-  }
+REQUIRED IN main.tf (IN THIS ORDER):
+1) terraform + required_providers (google,tls)
+2) provider "google" with var.gcp_project_id and var.gcp_region
+3) data sources:
+   - data "google_compute_zones" "available" for var.gcp_region
+4) tls_private_key (for SSH key material)
+5) VPC networking:
+   - google_compute_network (custom mode)
+   - google_compute_subnetwork (use var.vpc_cidr as ip_cidr_range, region=var.gcp_region)
+   - firewall rules:
+     - allow app ports from ports param (default 80/443)
+     - allow SSH ONLY from var.ssh_allowed_cidrs (never 0.0.0.0/0)
+6) compute instances:
+   - google_compute_instance "main" (count=var.instance_count)
+   - machine_type = var.instance_type (e2-micro default if missing)
+   - boot_disk initialize_params { image = var.os_image ; size = var.storage_size_gb ; type = var.storage_type }
+     (storage_type should map to pd-balanced/pd-ssd; default pd-balanced)
+   - network_interface using subnetwork + access_config if var.enable_public_ip == true
+   - metadata includes ssh-keys entry built from var.ssh_username + tls public key
 
-  # SSM (always include)
-  statement {
-    actions = [
-      "ssm:UpdateInstanceInformation",
-      "ssm:GetParameter",
-      "ssm:GetParameters"
-    ]
-    resources = ["*"]
-  }
+VARIABLES.TF MUST INCLUDE:
+- gcp_project_id, gcp_region
+- environment, project_name
+- instance_type, instance_count
+- os_image (e.g. "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts")
+- storage_size_gb, storage_type (pd-balanced|pd-ssd)
+- vpc_cidr
+- enable_public_ip (bool)
+- ssh_username (string)
+- ssh_allowed_cidrs (list(string))
+- ports (list(object({port=number, protocol=string, source_cidr=string, description=string})))
 
-  # Add additional service permissions based on user's iam_services parameter
-}
+OUTPUTS.TF MUST INCLUDE:
+- instance_ids (self_link or id), public_ips, private_ips
+- ssh_private_key (sensitive)
+- network_name, subnetwork_name, firewall_names
+"""
 
-3. TLS PRIVATE KEY (for SSH access):
-resource "tls_private_key" "instance_key" {
-  algorithm = "RSA"
-  rsa_bits  = 4096
-}
+    AZURE_TEMPLATE = """\
+PROVIDER TARGET: AZURE
 
-resource "aws_key_pair" "instance_key" {
-  key_name   = "${var.project_name}-${var.environment}-key"
-  public_key = tls_private_key.instance_key.public_key_openssh
-}
+REQUIRED IN main.tf (IN THIS ORDER):
+1) terraform + required_providers (azurerm,tls)
+2) provider "azurerm" { features {} }
+3) tls_private_key
+4) resource group + vnet + subnet:
+   - azurerm_resource_group
+   - azurerm_virtual_network (address_space from var.vpc_cidr)
+   - azurerm_subnet
+5) network security group rules:
+   - allow app ports from ports param (default 80/443) from their source_cidr
+   - allow SSH ONLY from var.ssh_allowed_cidrs (never 0.0.0.0/0)
+6) public IP + NIC:
+   - create azurerm_public_ip if var.enable_public_ip == true
+   - azurerm_network_interface with ip_configuration
+7) azurerm_linux_virtual_machine "main" (count)
+   - size = var.instance_type (B1s default)
+   - admin_username = var.ssh_username
+   - admin_ssh_key uses tls public key
+   - os_disk encrypted settings where supported
+   - source_image_reference OR source_image_id derived from var.os_image
 
-4. VPC & NETWORKING:
-resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags = { Name = "${var.project_name}-${var.environment}-vpc" }
-}
+VARIABLES.TF MUST INCLUDE:
+- azure_location, environment, project_name
+- instance_type, instance_count
+- os_image (either "UbuntuLTS" style alias you map to source_image_reference OR explicit image reference object)
+- storage_size_gb, storage_type (StandardSSD_LRS default)
+- vpc_cidr
+- enable_public_ip (bool)
+- ssh_username
+- ssh_allowed_cidrs (list(string))
+- ports list(object)
 
-resource "aws_subnet" "public" {
-  count                   = var.subnet_count
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)
-  availability_zone       = element(data.aws_availability_zones.available.names, count.index)
-  map_public_ip_on_launch = true
-  tags = { Name = "${var.project_name}-${var.environment}-public-${count.index + 1}" }
-}
+OUTPUTS.TF MUST INCLUDE:
+- vm_ids, public_ips, private_ips
+- ssh_private_key (sensitive)
+- resource_group_name, vnet_id, subnet_id, nsg_id
+"""
 
-resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id
-  tags   = { Name = "${var.project_name}-${var.environment}-igw" }
-}
+    DO_TEMPLATE = """\
+PROVIDER TARGET: DIGITALOCEAN
 
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
-  }
-  tags = { Name = "${var.project_name}-${var.environment}-public-rt" }
-}
+REQUIRED IN main.tf (IN THIS ORDER):
+1) terraform + required_providers (digitalocean,tls)
+2) provider "digitalocean" (NO hardcoded token; token must come from environment)
+3) tls_private_key + digitalocean_ssh_key
+4) digitalocean_firewall:
+   - inbound rules for app ports from ports param (default 80/443)
+   - inbound SSH only from var.ssh_allowed_cidrs (never 0.0.0.0/0)
+5) digitalocean_droplet "main" (count)
+   - region = var.do_region
+   - size = var.instance_type (basic-1vcpu-1gb default)
+   - image = var.os_image (e.g. "ubuntu-22-04-x64")
+   - ssh_keys includes digitalocean_ssh_key id
 
-resource "aws_route_table_association" "public" {
-  count          = var.subnet_count
-  subnet_id      = aws_subnet.public[count.index].id
-  route_table_id = aws_route_table.public.id
-}
+VARIABLES.TF MUST INCLUDE:
+- do_region, environment, project_name
+- instance_type, instance_count
+- os_image
+- ssh_allowed_cidrs (list(string))
+- ports list(object)
 
-5. SECURITY GROUP:
-resource "aws_security_group" "instance" {
-  vpc_id = aws_vpc.main.id
-  name   = "${var.project_name}-${var.environment}-instance-sg"
+OUTPUTS.TF MUST INCLUDE:
+- droplet_ids, public_ips, private_ips
+- ssh_private_key (sensitive)
+- firewall_id
+"""
 
-  # Add ingress rules from ports parameter
-  # Example: port 80, 443 from 0.0.0.0/0; port 22 from ssh_allowed_cidrs
+    CI_CD_TEMPLATE = """
+You are an expert DevOps Engineer specializing in GitHub Actions for Terraform.
+Generate a valid `.github/workflows/deploy.yml` file for {provider}.
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
+REQUIREMENTS:
+1.  **Triggers**:
+    -   `pull_request` to `main`: Run `terraform plan`.
+    -   `push` to `main`: Run `terraform apply -auto-approve`.
+    -   `workflow_dispatch`: Manual trigger.
 
-6. IAM ROLE & INSTANCE PROFILE:
-resource "aws_iam_role" "instance" {
-  name               = "${var.project_name}-${var.environment}-instance-role"
-  assume_role_policy = data.aws_iam_policy_document.instance_assume_role.json
-}
+2.  **Steps**:
+    -   Checkout code.
+    -   Setup Terraform (hashicorp/setup-terraform).
+    -   Configure Cloud Credentials (use secrets).
+    -   `terraform fmt -check`
+    -   `terraform init`
+    -   `terraform validate`
+    -   `terraform plan` (on PR)
+    -   `terraform apply` (on push to main)
 
-resource "aws_iam_role_policy" "instance" {
-  role   = aws_iam_role.instance.id
-  policy = data.aws_iam_policy_document.instance_policy.json
-}
+3.  **Secrets to Use** (Use these exact names):
+    -   AWS: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+    -   GCP: `GCP_SA_KEY` (JSON)
+    -   Azure: `AZURE_CREDENTIALS` (JSON)
+    -   DigitalOcean: `DO_TOKEN`
 
-resource "aws_iam_instance_profile" "instance" {
-  name = "${var.project_name}-${var.environment}-instance-profile"
-  role = aws_iam_role.instance.name
-}
-
-7. EC2 INSTANCES:
-resource "aws_instance" "main" {
-  count                = var.instance_count
-  ami                  = data.aws_ami.selected.id
-  instance_type        = var.instance_type
-  key_name             = aws_key_pair.instance_key.key_name
-  subnet_id            = element(aws_subnet.public[*].id, count.index)
-  vpc_security_group_ids = [aws_security_group.instance.id]
-  iam_instance_profile = aws_iam_instance_profile.instance.name
-
-  root_block_device {
-    volume_size           = var.storage_size_gb
-    volume_type           = var.storage_type
-    encrypted             = true
-    delete_on_termination = true
-  }
-
-  metadata_options {
-    http_tokens   = "required"
-    http_endpoint = "enabled"
-  }
-
-  tags = { Name = "${var.project_name}-${var.environment}-${count.index + 1}" }
-}
-
-8. LOAD BALANCER (if load_balancer_type != "none"):
-# Add ALB/NLB resources if requested
-
-═══════════════════════════════════════════════════════════════
-VARIABLES.TF MUST INCLUDE
-═══════════════════════════════════════════════════════════════
-
-variable "aws_region" {
-  type    = string
-  default = "<from params>"
-}
-
-variable "environment" {
-  type = string
-  validation {
-    condition     = contains(["dev", "staging", "prod"], var.environment)
-    error_message = "Environment must be dev, staging, or prod"
-  }
-}
-
-variable "project_name" {
-  type    = string
-  default = "<infer from workload_description or use 'app'>"
-}
-
-variable "instance_type" { type = string }
-variable "instance_count" { type = number }
-variable "storage_size_gb" { type = number }
-variable "storage_type" { type = string }
-variable "vpc_cidr" { type = string }
-variable "subnet_count" { type = number }
-
-variable "ssh_allowed_cidrs" {
-  type        = list(string)
-  description = "CIDRs allowed to SSH"
-}
-
-═══════════════════════════════════════════════════════════════
-OUTPUTS.TF MUST INCLUDE
-═══════════════════════════════════════════════════════════════
-
-output "instance_ids" {
-  value = aws_instance.main[*].id
-}
-
-output "public_ips" {
-  value = aws_instance.main[*].public_ip
-}
-
-output "private_ips" {
-  value = aws_instance.main[*].private_ip
-}
-
-output "ssh_private_key" {
-  value     = tls_private_key.instance_key.private_key_pem
-  sensitive = true
-}
-
-output "vpc_id" {
-  value = aws_vpc.main.id
-}
-
-output "security_group_id" {
-  value = aws_security_group.instance.id
-}
-
-output "iam_role_arn" {
-  value = aws_iam_role.instance.arn
-}
-
-═══════════════════════════════════════════════════════════════
-CRITICAL RULES
-═══════════════════════════════════════════════════════════════
-
-✅ MUST INCLUDE:
-- All data sources (aws_ami, aws_availability_zones, aws_iam_policy_document)
-- TLS private key resource
-- IAM role, policy, instance profile
-- VPC with internet gateway and route table
-- Security group with user-specified ports
-- EC2 instances with encryption, IMDSv2, IAM profile
-
-❌ NEVER:
-- Hardcode AMI IDs (use data.aws_ami)
-- Hardcode credentials
-- Allow 0.0.0.0/0 for SSH
-- Reference non-existent data sources
-- Forget to define resources you reference in outputs
-
-🎯 VALIDATION:
-- Every resource referenced in outputs MUST be defined in main.tf
-- Every variable in main.tf MUST be defined in variables.tf
-- Code MUST pass `terraform validate`
+OUTPUT:
+Return ONLY the raw YAML content. No markdown fences.
 """
 
     def __init__(self) -> None:
-        # LLMService handles provider selection, no need to enforce OPENAI_API_KEY here
         self.llm_service = LLMService()
         logger.info("LLMGenerator initialized with LLMService")
 
-    def generate_terraform(
-        self, params: Dict[str, Any], provider: str = "aws"
-    ) -> TerraformBundle:
-        """Generate Terraform from structured conversation parameters."""
+    # -----------------------------
+    # Public API
+    # -----------------------------
+    def generate_terraform(self, params: Dict[str, Any], provider: str = "aws") -> TerraformBundle:
         prompt = self._build_prompt(params, provider)
-        return self._call(prompt, self.SYSTEM_PROMPT)
+        system_prompt = self._build_system_prompt(params, provider)
+        bundle = self._call(prompt, system_prompt)
+        
+        # Generate CI/CD workflow
+        workflow_yaml = self._generate_workflow(params, provider)
+        bundle.github_workflow_yaml = workflow_yaml
+        
+        return self._post_process_code(bundle)
+
+    def _generate_workflow(self, params: Dict[str, Any], provider: str) -> str:
+        prompt = self.CI_CD_TEMPLATE.format(provider=provider.upper())
+        try:
+            raw = self.llm_service.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=1500,
+                timeout=20,
+            )
+            # Cleanup potential markdown fences
+            clean = raw.replace("```yaml", "").replace("```", "").strip()
+            return clean
+        except Exception as e:
+            logger.error("Failed to generate CI/CD workflow: %s", e)
+            return "# Error generating workflow file."
+
+    def _post_process_code(self, bundle: TerraformBundle) -> TerraformBundle:
+        """
+        Run terraform fmt and validate on the generated code.
+        If tools are missing or validation fails, return original bundle with logs.
+        """
+        # Check if terraform is installed
+        try:
+            subprocess.run(["terraform", "--version"], check=True, capture_output=True)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            logger.warning("Terraform CLI not found. Skipping fmt/validate.")
+            return bundle
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            
+            # Write files
+            (tmp_path / "main.tf").write_text(bundle.main_tf, encoding="utf-8")
+            (tmp_path / "variables.tf").write_text(bundle.variables_tf, encoding="utf-8")
+            (tmp_path / "outputs.tf").write_text(bundle.outputs_tf, encoding="utf-8")
+
+            # 1. Run terraform fmt
+            try:
+                subprocess.run(
+                    ["terraform", "fmt"], 
+                    cwd=tmpdir, 
+                    check=True, 
+                    capture_output=True
+                )
+                # Read back formatted code
+                bundle.main_tf = (tmp_path / "main.tf").read_text(encoding="utf-8")
+                bundle.variables_tf = (tmp_path / "variables.tf").read_text(encoding="utf-8")
+                bundle.outputs_tf = (tmp_path / "outputs.tf").read_text(encoding="utf-8")
+                logger.info("Terraform code formatted successfully.")
+            except subprocess.CalledProcessError as e:
+                logger.warning("terraform fmt failed: %s", e.stderr.decode())
+
+            # 2. Run terraform init (backend=false) + validate
+            try:
+                subprocess.run(
+                    ["terraform", "init", "-backend=false"], 
+                    cwd=tmpdir, 
+                    check=True, 
+                    capture_output=True
+                )
+                subprocess.run(
+                    ["terraform", "validate"], 
+                    cwd=tmpdir, 
+                    check=True, 
+                    capture_output=True
+                )
+                logger.info("Terraform code validated successfully.")
+            except subprocess.CalledProcessError as e:
+                logger.error("terraform validate failed: %s", e.stderr.decode())
+                # We still return the bundle, but logs will show the error.
+                # In a future iteration, we could retry generation.
+
+        return bundle
 
     def refine_terraform(
         self,
@@ -337,39 +350,103 @@ CRITICAL RULES
         feedback: str,
         provider: str = "aws",
     ) -> TerraformBundle:
-        """Refine existing Terraform based on user feedback."""
         prompt = (
             f"Original request: {base_request}\n"
             f"User feedback: {feedback}\n"
             f"Current code:\n{json.dumps(current_code, indent=2)}\n\n"
-            f"Apply the feedback and return updated JSON with main_tf, variables_tf, outputs_tf."
+            "Apply the feedback and return updated JSON with main_tf, variables_tf, outputs_tf."
         )
-        return self._call(prompt, self.SYSTEM_PROMPT)
+        system_prompt = self._build_system_prompt({}, provider)
+        return self._call(prompt, system_prompt)
+
+    # -----------------------------
+    # Internals
+    # -----------------------------
+    def _build_system_prompt(self, params: Dict[str, Any], provider: str) -> str:
+        provider_norm = (params.get("cloud_provider") or provider or "aws").lower()
+
+        provider_block = {
+            "aws": self.AWS_TEMPLATE,
+            "gcp": self.GCP_TEMPLATE,
+            "azure": self.AZURE_TEMPLATE,
+            "digitalocean": self.DO_TEMPLATE,
+        }.get(provider_norm, self.AWS_TEMPLATE)
+
+        return self.BASE_SYSTEM_PROMPT + "\n\n" + provider_block + "\n\n" + self.README_BRIDGE_PROMPT
+
+    def _provider_defaults(self, provider_norm: str) -> Dict[str, Any]:
+        provider_norm = (provider_norm or "aws").lower()
+        return {
+            "aws": {
+                "region_key": "aws_region",
+                "default_region": "us-east-1",
+                "default_instance": "t3.micro",
+                "default_storage_type": "gp3",
+                "default_os_image": "ubuntu-22.04",
+            },
+            "gcp": {
+                "region_key": "gcp_region",
+                "default_region": "us-central1",
+                "default_instance": "e2-micro",
+                "default_storage_type": "pd-balanced",
+                "default_os_image": "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts",
+            },
+            "azure": {
+                "region_key": "azure_location",
+                "default_region": "eastus",
+                "default_instance": "B1s",
+                "default_storage_type": "StandardSSD_LRS",
+                "default_os_image": "UbuntuLTS",
+            },
+            "digitalocean": {
+                "region_key": "do_region",
+                "default_region": "nyc1",
+                "default_instance": "basic-1vcpu-1gb",
+                "default_storage_type": "",
+                "default_os_image": "ubuntu-22-04-x64",
+            },
+        }.get(provider_norm, {
+            "region_key": "aws_region",
+            "default_region": "us-east-1",
+            "default_instance": "t3.micro",
+            "default_storage_type": "gp3",
+            "default_os_image": "ubuntu-22.04",
+        })
 
     def _build_prompt(self, params: Dict[str, Any], provider: str) -> str:
-        """Build a rich, structured prompt from ALL conversation parameters."""
-        p = params  # shorthand
+        p = params
         provider_norm = (p.get("cloud_provider") or provider or "aws").lower()
+
         provider_display = {
             "aws": "AWS EC2",
             "gcp": "GCP Compute Engine",
             "azure": "Azure Virtual Machines",
             "digitalocean": "DigitalOcean Droplets",
         }.get(provider_norm, "AWS EC2")
-        default_region = {
-            "aws": "us-east-1",
-            "gcp": "us-central1",
-            "azure": "eastus",
-            "digitalocean": "nyc1",
-        }.get(provider_norm, "us-east-1")
-        default_instance = {
-            "aws": "t3.micro",
-            "gcp": "e2-micro",
-            "azure": "B1s",
-            "digitalocean": "basic-1vCPU-1GB",
-        }.get(provider_norm, "t3.micro")
 
-        # Format ports for readability
+        d = self._provider_defaults(provider_norm)
+
+        # Region resolution:
+        # - accept old "region" if present
+        # - accept provider-native key (aws_region/gcp_region/azure_location/do_region)
+        # - fallback to default
+        region_value = (
+            p.get(d["region_key"])
+            or p.get("region")
+            or d["default_region"]
+        )
+
+        instance_type = p.get("instance_type") or d["default_instance"]
+        instance_count = int(p.get("instance_count", 1) or 1)
+
+        # OS image default differs per provider
+        os_image = p.get("os_image") or p.get("ami_os") or d["default_os_image"]
+
+        # Storage type differs per provider; DO often ignores disk type in droplet
+        storage_size_gb = p.get("storage_size_gb", p.get("storage_size", 20)) or 20
+        storage_type = p.get("storage_type") or d["default_storage_type"]
+
+        # ports formatted
         ports_desc = ""
         for port_entry in p.get("ports", []):
             if isinstance(port_entry, dict):
@@ -379,89 +456,112 @@ CRITICAL RULES
                     f"({port_entry.get('description', '')})\n"
                 )
 
-        # Format IAM services
-        iam_desc = ""
-        for svc, actions in p.get("iam_services", {}).items():
-            iam_desc += f"  - {svc}: {', '.join(actions)}\n"
-
-        # Auto-scaling config
-        asg_desc = "Not enabled"
-        if p.get("auto_scaling_enabled") and p.get("auto_scaling_config"):
-            asc = p["auto_scaling_config"]
-            asg_desc = f"min={asc.get('min', 1)}, max={asc.get('max', 4)}, target_cpu={asc.get('target_cpu', 70)}%"
-
-        ssh_cidrs = ", ".join(p.get("ssh_allowed_cidrs", ["10.0.0.0/8"]))
-
-        # Pre-compute fallbacks (Python 3.11 doesn't allow \ in f-string braces)
         default_ports = (
             "  - Port 80/tcp from 0.0.0.0/0 (HTTP)\n"
             "  - Port 443/tcp from 0.0.0.0/0 (HTTPS)\n"
         )
-        default_iam = (
-            "  - cloudwatch: basic logging\n"
-            "  - ssm: instance management\n"
-        )
         ports_section = ports_desc if ports_desc else default_ports
-        iam_section = iam_desc if iam_desc else default_iam
 
-        prompt = f"""Generate production-grade Terraform configuration for {provider_display}.
+        dependencies = p.get("dependencies", [])
+        if isinstance(dependencies, list):
+            readme_dependencies = ", ".join(str(dep) for dep in dependencies if dep) or "Not explicitly listed"
+        else:
+            readme_dependencies = str(dependencies or "Not explicitly listed")
+
+        implied_resources = p.get("implied_resources", [])
+        if isinstance(implied_resources, list):
+            implied_str = ", ".join(implied_resources)
+        else:
+            implied_str = str(implied_resources)
+
+        readme_language = str(p.get("language", "Not specified"))
+
+        # security: ensure we pass ssh cidrs in prompt
+        ssh_cidrs = ", ".join(p.get("ssh_allowed_cidrs", [])) or "MISSING (must be collected; never 0.0.0.0/0)"
+
+        # provider-specific required vars (must exist as vars if missing)
+        gcp_project_id = p.get("gcp_project_id", "")
+        azure_location = p.get("azure_location", "")
+        do_region = p.get("do_region", "")
+        gcp_region = p.get("gcp_region", "")
+        aws_region = p.get("aws_region", "")
+        ssh_username = p.get("ssh_username", "")
+
+        provider_missing_notes = []
+        if provider_norm == "gcp" and not gcp_project_id:
+            provider_missing_notes.append("MISSING: gcp_project_id (must be a variable)")
+        if provider_norm == "gcp" and not (gcp_region or p.get("region")):
+            provider_missing_notes.append("MISSING: gcp_region (must be a variable)")
+        if provider_norm == "azure" and not (azure_location or p.get("region")):
+            provider_missing_notes.append("MISSING: azure_location (must be a variable)")
+        if provider_norm == "digitalocean" and not (do_region or p.get("region")):
+            provider_missing_notes.append("MISSING: do_region (must be a variable)")
+        if provider_norm in ("gcp", "azure") and not ssh_username:
+            provider_missing_notes.append("MISSING: ssh_username (must be a variable)")
+
+        missing_block = ""
+        if provider_missing_notes:
+            missing_block = "PROVIDER MISSING NOTES:\n  - " + "\n  - ".join(provider_missing_notes) + "\n"
+
+        # README context for intelligent deployment
+        readme_context = p.get("readme_context", "")
+        github_owner = p.get("github_owner", "")
+        github_repo = p.get("github_repo", "")
+        project_name = p.get("project_name") or github_repo or "app"
+        has_docker = p.get("has_docker", False)
+        database_type = p.get("database_type", "none")
+
+        prompt = f"""Generate the BEST POSSIBLE production-grade Terraform configuration for {provider_display}.
+This Terraform should FULLY deploy the project from GitHub repo: {github_owner}/{github_repo}
 
 WORKLOAD: {p.get('workload_description', p.get('service_type', 'web server'))}
+PROJECT NAME: {project_name}
 ENVIRONMENT: {p.get('environment', 'dev')}
 
-COMPUTE:
-  Instance type: {p.get('instance_type', default_instance)}
-  Instance count: {p.get('instance_count', 1)}
-  Region: {p.get('region', default_region)}
-  OS: {p.get('os_image', 'ubuntu-22.04')} (use data "aws_ami" to find latest)
+README CONTEXT (USE THIS TO MAKE INTELLIGENT DECISIONS):
+{p.get('readme_context', p.get('project_context', ''))[:3000]}
 
-STORAGE:
-  Root volume: {p.get('storage_size_gb', p.get('storage_size', 20))} GB {p.get('storage_type', 'gp3')}
-  Encrypted: true (always)
+README SIGNALS:
+  Primary language/framework: {readme_language}
+  Declared dependencies/services: {readme_dependencies}
+  Implied Resources (Auto-Detected): {implied_str}
+  Database: {database_type}
+  Docker detected: {has_docker}
+  GitHub Repo: {github_owner}/{github_repo}
 
-NETWORKING:
+CORE PARAMS:
+  {d["region_key"]}: {region_value}
+  Instance type: {instance_type}
+  Instance count: {instance_count}
+  OS image: {os_image}
+  Storage: {int(storage_size_gb)}GB {storage_type or "(provider default)"}
   VPC CIDR: {p.get('vpc_cidr', '10.0.0.0/16')}
-  Subnet type: {p.get('subnet_type', 'both')} (public + private)
-  Subnet count: {p.get('subnet_count', 2)} AZs (use data "aws_availability_zones")
+  Subnet count: {p.get('subnet_count', 2)}
   Public IP: {p.get('enable_public_ip', True)}
-  Load balancer: {p.get('load_balancer_type', 'none')}
-  HTTPS: {p.get('enable_https', False)}
 
-SECURITY GROUP PORTS:
+SECURITY GROUP / FIREWALL PORTS:
 {ports_section}  SSH allowed CIDRs: {ssh_cidrs}
 
-IAM ROLE ({p.get('iam_role_name', 'app-role')}):
-{iam_section}  Create custom IAM role with data "aws_iam_policy_document".
-  Attach as instance profile.
-
-MONITORING:
-  Detailed monitoring: {p.get('detailed_monitoring', False)}
-  CloudWatch logs: {p.get('cloudwatch_logs_enabled', True)}
-  Log retention: {p.get('log_retention_days', 30)} days
-  CloudWatch log group for application logs
-
-AUTO-SCALING: {asg_desc}
-
-SECURITY HARDENING:
-  IMDSv2: required (http_tokens = "required")
-  SSH key: generate via tls_private_key + aws_key_pair
-  EBS encryption: enabled
+{missing_block}PROVIDER-SPECIFIC REQUIRED VARS (fill from params or create variables):
+  AWS: aws_region={aws_region or "<var.aws_region>"}
+  GCP: gcp_project_id={gcp_project_id or "<var.gcp_project_id>"} ; gcp_region={gcp_region or "<var.gcp_region>"}
+  Azure: azure_location={azure_location or "<var.azure_location>"}
+  DigitalOcean: do_region={do_region or "<var.do_region>"}
+  SSH username (GCP/Azure): ssh_username={ssh_username or "<var.ssh_username>"}
 
 CRITICAL REQUIREMENTS:
-1. Use data "aws_ami" with owner and name filters — NO hardcoded AMI IDs
-2. Use data "aws_availability_zones" for multi-AZ subnets
-3. Use data "aws_iam_policy_document" for all IAM policies
-4. All passwords/keys marked sensitive
-5. Proper tags on every resource
-6. Code must pass terraform validate
-7. Return ONLY the JSON object with main_tf, variables_tf, outputs_tf"""
-
+- Follow the provider template rules from system prompt exactly.
+- Define every variable referenced.
+- Define every output referenced.
+- Never allow SSH from 0.0.0.0/0.
+- Include a user_data/startup script that clones https://github.com/{github_owner}/{github_repo}, installs dependencies, and starts the app.
+- If Docker is detected, use Docker-based deployment in user_data.
+- If a database is needed ({database_type}), provision appropriate storage or managed service.
+- Return ONLY the JSON object with main_tf, variables_tf, outputs_tf.
+"""
         return prompt
 
-    def _call(
-        self, user_prompt: str, system_prompt: str
-    ) -> TerraformBundle:
-        """Call LLM service (OpenAI with Gemini fallback) and parse Terraform JSON."""
+    def _call(self, user_prompt: str, system_prompt: str) -> TerraformBundle:
         raw = self.llm_service.chat_completion(
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -474,7 +574,6 @@ CRITICAL REQUIREMENTS:
         )
         data = json.loads(raw)
 
-        # Ensure all keys are strings
         for key in ("main_tf", "variables_tf", "outputs_tf"):
             val = data.get(key, "")
             if isinstance(val, dict):

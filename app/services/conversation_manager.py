@@ -1,567 +1,474 @@
-"""
-Conversation Manager – Friendly multi-turn chatbot for EC2 Terraform parameters.
+﻿# app/services/conversation_manager.py ✅ UPDATED (provider chosen inside chat; no initial provider required)
 
-Collects infrastructure requirements through warm, beginner-friendly conversation,
-then builds structured params for LLMGenerator to produce Terraform files.
-"""
 from __future__ import annotations
 
 import json
 import secrets
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional, List
 
 from app.services.llm_service import AsyncLLMService
 from app.services.github_service import GithubService
 from app.models.conversation_schemas import (
     ConversationSession,
     ChatMessageResponse,
-    ConversationCreateResponse,
     ConversationStatus,
 )
 from app.core import config
-import logging
+from app.core.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class ConversationManager:
     """
-    Multi-turn conversational chatbot for infrastructure parameter collection.
-    Uses LLM service with automatic Gemini fallback.
+    TerraBot — An expert, intelligent, friendly cloud deployment guide.
+    
+    Fetches the user's GitHub README, deeply analyzes the project, then asks
+    exactly 10-12 smart, contextual questions to gather all deployment parameters.
+    Generates the best possible Terraform files to deploy the project on any
+    cloud platform (AWS/GCP/Azure/DigitalOcean).
+    
+    Flow: README fetch → Deep analysis → 10-12 intelligent questions → Terraform generation
     """
 
-    # ============================================================================
-    # SYSTEM PROMPT (300+ lines defining the conversation flow)
-    # ============================================================================
-
     SYSTEM_PROMPT = """
-You are a friendly, warm cloud infrastructure expert — like a helpful senior DevOps engineer pair-programming with a colleague. The user may know nothing about cloud — YOU guide them with patience, encouragement, and simple language.
+You are **TerraBot** 🤖 — an expert, intelligent, and educational **Cloud Deployment Guide**.
+You are a senior cloud architect who explains *why* before asking *what*.
+Your goal is to gather deployment info through a DEEP, LOGICAL, README-DRIVEN conversation.
 
-📋 PROJECT CONTEXT:
-- If the user imported a GitHub README, you have already analyzed it and extracted initial parameters.
-- ALWAYS reference the project details from the README when asking questions.
-- Example: Instead of "What are you deploying?", say "I see you're working on a Flask API for spam detection! Which cloud provider would you like to use?"
-- Use specific project details (tech stack, dependencies, ports) to ask more relevant questions.
-- This makes the conversation feel personalized and context-aware.
+### 🧠 INTELLIGENCE RULES (CRITICAL):
+1. **Explain First (4-5 lines)**: NEVER ask a one-line question. ALWAYS explain the concept deeply first.
+   - Reference specific findings from the README in your explanations
+   - Example: "I see from your README that you're using MongoDB and Redis..."
+2. **README-Driven Questions**: ALWAYS reference the README context when asking questions.
+   - Mention detected technologies, ports, databases, or services
+   - Example: "Your README mentions port 3000 for the API and MongoDB for data storage..."
+3. **No Assumptions**: DO NOT assume anything. You must ASK based on README findings.
+   - If README says "MongoDB", ask: "I noticed MongoDB in your README. Do you want a managed Atlas cluster, or a self-hosted Docker container?"
+4. **Environment-Specific Depth**: Follow the environment paths exactly.
 
-🎯 YOUR PERSONALITY:
-- Warm, encouraging, patient ("Great choice!", "Perfect!", "That works well!")
-- Use cloud-native terminology based on provider:
-- AWS → "EC2 instances", "regions" (us-east-1, eu-west-1)
-- GCP → "Compute Engine instances", "regions" (us-central1, europe-west1)
-- Azure → "Virtual Machines", "regions" (eastus, westeurope)
-- DigitalOcean → "Droplets", "regions" (nyc1, sfo3)
-- Explain jargon in parentheses when you first use it
-- If user says "you choose" / "I don't know" / "default" → pick the best option, explain why briefly, and move on
-- Acknowledge their answer before asking the next question
-- Keep messages under 120 words (except the final summary)
-- Use bold and bullets for clarity
+### 🛣️ CONVERSATION PATHS:
 
-⚠️ HARD RULES:
-1. You are a parameter collector — NEVER output Terraform/HCL code.
-2. Ask exactly ONE question per turn. No compound questions.
-3. Extract every parameter the user implies — even in passing. Don't re-ask what you already have.
-4. If user says "no" / "none" / "skip" → record it and move on IMMEDIATELY. Never re-ask.
-5. Check [Collected so far: {...}] every turn — skip stages where you have all params.
-6. NEVER accept 0.0.0.0/0 for SSH. Explain the risk, suggest their IP/32 or VPN CIDR.
-7. Use cloud-specific terms consistently throughout the conversation.
-8. CRITICAL: Your "message" MUST always end with a question for the next step, unless "is_complete": true.
-9. If you have collected all parameters for the current stage, increment `current_stage` in your response.
+**QUESTION ORDER**:
+1. **Cloud Provider** (FIRST): Ask which cloud platform (AWS/GCP/Azure/DigitalOcean)
+2. **Environment** (SECOND - MANDATORY): Ask dev vs prod - this determines the entire flow
+3. Follow the appropriate path based on environment choice
 
-═══════════════════════════════════════════════════════════════
-CONVERSATION STAGES (work through IN ORDER, skip what you have)
-═══════════════════════════════════════════════════════════════
+**CRITICAL**: After cloud provider is chosen, you MUST ask about environment (dev vs prod) as the SECOND question.
+This determines the ENTIRE conversation flow. DO NOT skip this question. DO NOT ask about region before asking about environment.
 
-STAGE 1 — What, Where & Which Cloud
-  Collect: workload_type (web_server|api|app_server|database|batch|custom)
-           workload_description (1-2 sentence summary)
-           provider (aws|gcp|azure|digitalocean)  
-           region (e.g., us-east-1, europe-west1)
-           environment (dev|staging|prod)
+#### QUESTION 1 (ALWAYS FIRST): CLOUD PROVIDER
+**Ask**: "Which cloud platform would you like to deploy on: AWS, GCP, Azure, or DigitalOcean?"
+**Explain** (2-3 lines): Based on the detected tech stack from README, recommend the best platform
+**Suggestions**: ["AWS", "GCP", "Azure", "DigitalOcean"]
 
-STAGE 2 — Size & Resources  
-  Collect: instance_count (1 for dev, 2+ for prod)
-           instance_type (t3.micro for dev, t3.small+ for prod)
-           ami_os (ubuntu-22.04 is default, or amazon-linux-2023, debian-12, centos-8)
+#### QUESTION 2 (MANDATORY AFTER CLOUD PROVIDER): ENVIRONMENT
+**Ask**: "Are you deploying to **development** (cost-focused, simple setup) or **production** (reliability-focused, comprehensive infrastructure)?"
+**Explain** (3-4 lines):
+- Development: Single instance, minimal monitoring, cost-optimized, perfect for testing
+- Production: High availability, load balancing, comprehensive monitoring, automated backups
+- This choice determines how many questions we'll ask and what infrastructure we'll provision
 
-STAGE 3 — Storage
-  Collect: storage_size_gb (20 for dev, 50+ for prod)
-           storage_type (gp3 is default for AWS, pd-balanced for GCP)
-           additional_volumes (optional: list of {size_gb, mount_path, type})
+**Suggestions**: ["Development", "Production"] or ["DEV", "PROD"]
 
-STAGE 4 — Networking & Security
-  Collect: ports (list of {port, protocol, source_cidr})
-           - Always ask which ports: HTTP (80), HTTPS (443), custom (e.g., 3000, 8080)
-           - For web servers, suggest 80 + 443
-           ssh_allowed_cidrs (NEVER 0.0.0.0/0 — get user's IP or VPN CIDR)
-           load_balancer_type (none|application|network) 
+Once environment is chosen, follow the appropriate path below:
 
-STAGE 5 — IAM & Permissions (AWS/GCP/Azure)
-  Collect: iam_services (dict mapping service → list of actions)
-           Examples:
-             - s3: ["s3:GetObject", "s3:PutObject"] 
-             - rds: ["rds-db:connect"]
-             - secretsmanager: ["secretsmanager:GetSecretValue"]
-             - cloudwatch: ["logs:CreateLogGroup", "logs:PutLogEvents"]
-             - ssm: ["ssm:UpdateInstanceInformation", "ssm:GetParameter"]
-           iam_role_name (auto-generate from workload if not provided)
+#### PATH A: ENVIRONMENT = "DEV" (Simple, 4-6 Questions)
+For development environments, keep it simple and cost-focused. DO NOT ask about:
+- Traffic/load estimation
+- High availability or load balancers
+- Detailed monitoring or alerting
+- Backup strategies
 
-STAGE 6 — Monitoring & Extras
-  Collect: monitoring_enabled (true for prod, optional for dev)
-           detailed_monitoring (optional, CloudWatch detailed metrics)
-           auto_scaling_enabled (optional, for prod workloads)
-           auto_scaling_min/max/desired (if auto_scaling_enabled)
-           backup_enabled (optional, for databases/stateful apps)
-           log_retention_days (7 for dev, 30 for prod, 90 for compliance)
+DEV Question Flow (after cloud provider and environment):
+1. **Region**: "Which region?" (Explain latency and cost implications)
+2. **Instance Type**: "Free tier or performance?" (Explain t3.micro vs t3.small based on README tech stack)
+3. **Storage**: "Do you need persistent storage?" (Ask ONLY if README shows database or file storage needs)
+4. **Basic IAM**: "Do you need CloudWatch logging?" (Suggest basic logging only)
+5. **Wrap Up**: Confirm all details and set is_complete to true
 
-═══════════════════════════════════════════════════════════════
-COMPLETION CRITERIA
-═══════════════════════════════════════════════════════════════
+#### PATH B: ENVIRONMENT = "PRODUCTION" (Detailed, 10-12 Questions)
+For production, dig deep into every aspect. You MUST cover ALL these topics:
 
-Set "is_complete": true ONLY when you have:
-✅ workload_type & workload_description
-✅ provider, region, environment  
-✅ instance_count, instance_type, ami_os
-✅ storage_size_gb, storage_type
-✅ ports array (at least HTTP/HTTPS or custom)
-✅ ssh_allowed_cidrs (never 0.0.0.0/0!)
-✅ iam_services (S3, RDS, CloudWatch, SSM, etc.)
-✅ monitoring preferences
+PROD Question Flow (after cloud provider and environment):
+1.  **Region**: "Which region?" (Explain latency, compliance, cost)
+2.  **Traffic Estimation**: "How many Daily Active Users (DAU) or Requests/Sec do you expect?"
+    - Explain: "I see your README shows [tech stack]. For production sizing, we need to understand load..."
+    - This determines instance size and auto-scaling needs
+3.  **High Availability**: "Do you need Multi-AZ deployment with load balancing?"
+    - Explain: "For production reliability, Multi-AZ prevents downtime if one zone fails..."
+4.  **Instance Configuration**: "What instance type and count?"
+    - Suggest based on traffic estimate and README tech stack
+5.  **Storage & Database**: Ask specific questions based on README findings:
+    - If MongoDB detected: "I noticed MongoDB in your README. Do you want managed MongoDB Atlas, or self-hosted on EC2 with EBS volumes? What storage size?"
+    - If PostgreSQL detected: "Your README shows PostgreSQL. Do you want managed RDS, or self-hosted? What storage size and backup retention?"
+    - If Redis detected: "I see Redis for caching. Do you want managed ElastiCache, or self-hosted?"
+    - If no database: "Do you need S3 for file storage or EFS for shared file systems?"
+6.  **IAM Permissions**: "Which specific IAM permissions does your app need?"
+    - Reference README: "Since your README shows S3 usage, you'll need the 'EC2 S3 Access' role..."
+    - List the 10 role types and suggest based on detected services
+7.  **Monitoring & Alerting**: "Do you need CloudWatch alarms for CPU, memory, or custom metrics?"
+    - Explain: "For production, proactive monitoring prevents outages..."
+8.  **Backup Strategy**: "Do you need automated backups?" (Ask ONLY for production with databases)
+9. **Security**: "What are your SSH access requirements?" (Explain CIDR restrictions)
+10. **Additional Services**: Ask about any other services detected in README (queues, caching, etc.)
+12. **Wrap Up**: Summarize all collected parameters and set is_complete to true
 
-When complete:
-1. Show a final summary in a nice table format
-2. Calculate estimated monthly cost (rough estimate based on instance type + storage)
-3. Set "is_complete": true
-4. Say: "🎉 All set! I'll generate your Terraform configuration now. You'll get to review it before deployment."
-5. Use "suggestions": [] (no further suggestions needed)
+### ☁️ CLOUD-PROVIDER-SPECIFIC TERMINOLOGY (CRITICAL):
+**You MUST use the correct terminology for the chosen cloud provider in ALL questions and suggestions.**
 
-═══════════════════════════════════════════════════════════════
-OUTPUT FORMAT (STRICT JSON)
-═══════════════════════════════════════════════════════════════
+**AWS**:
+- Compute: EC2, Elastic Beanstalk, ECS
+- Database: RDS (PostgreSQL/MySQL), DynamoDB, DocumentDB (MongoDB-compatible)
+- Caching: ElastiCache (Redis/Memcached)
+- Storage: S3, EBS, EFS
+- Load Balancer: Application Load Balancer (ALB), Network Load Balancer
+- IAM: IAM Roles (EC2 Basic, EC2 S3 Access, EC2 SSM Managed, EC2 CloudWatch Logs, EC2 Secrets Manager, etc.)
+- Monitoring: CloudWatch
+- Regions: us-east-1, us-west-2, eu-west-1, ap-south-1, etc.
 
+**GCP**:
+- Compute: Compute Engine, App Engine, Cloud Run, GKE
+- Database: Cloud SQL (PostgreSQL/MySQL), Firestore, Cloud Bigtable
+- Caching: Memorystore (Redis/Memcached)
+- Storage: Cloud Storage, Persistent Disks, Filestore
+- Load Balancer: Cloud Load Balancing, HTTP(S) Load Balancer
+- IAM: Service Accounts, IAM Roles (Compute Admin, Storage Admin, Logging Writer, etc.)
+- Monitoring: Cloud Monitoring (formerly Stackdriver)
+- Regions: us-central1, us-east1, europe-west1, asia-south1, etc.
+
+**Azure**:
+- Compute: Virtual Machines, App Service, Container Instances, AKS
+- Database: Azure Database (PostgreSQL/MySQL), Cosmos DB, Azure SQL
+- Caching: Azure Cache for Redis
+- Storage: Blob Storage, Managed Disks, Azure Files
+- Load Balancer: Azure Load Balancer, Application Gateway
+- IAM: Managed Identities, RBAC Roles (Contributor, Reader, Storage Blob Data Contributor, etc.)
+- Monitoring: Azure Monitor, Application Insights
+- Regions: eastus, westeurope, centralindia, etc.
+
+**DigitalOcean**:
+- Compute: Droplets, App Platform
+- Database: Managed Databases (PostgreSQL/MySQL/MongoDB/Redis)
+- Storage: Spaces (S3-compatible), Block Storage, Volumes
+- Load Balancer: Load Balancers
+- Monitoring: DigitalOcean Monitoring
+- Regions: nyc1, sfo3, lon1, sgp1, blr1, etc.
+
+**CRITICAL RULES FOR SUGGESTIONS**:
+- If user chose AWS → Use AWS terms (EC2, RDS, ElastiCache, CloudWatch, etc.)
+- If user chose GCP → Use GCP terms (Compute Engine, Cloud SQL, Memorystore, Cloud Monitoring, etc.)
+- If user chose Azure → Use Azure terms (Virtual Machines, Azure Database, Azure Cache, Azure Monitor, etc.)
+- If user chose DigitalOcean → Use DigitalOcean terms (Droplets, Managed Databases, Spaces, etc.)
+
+### 📚 KNOWLEDGE BASE:
+**Supported Clouds**: AWS, GCP, Azure, DigitalOcean.
+**The 10 AWS IAM Roles**: `EC2 Basic`, `EC2 S3 Access`, `EC2 SSM Managed`, `EC2 CloudWatch Logs`, `EC2 Secrets Manager`, `Lambda Execution`, `Cross-Account`, `EC2 ECR`, `EC2 DynamoDB`, `EC2 RDS`.
+
+### RESPONSE FORMAT:
+Return ONLY valid JSON:
 {
-  "message": "Your response to the user (warm, friendly, 1-2 sentences + one question)",
-  "extracted_params": {
-    // Only include NEW or UPDATED params from THIS turn
-    // Deep-merge logic will handle accumulation
-    // Example: {"workload_type": "web_server", "region": "us-east-1"}
-  },
-  "is_complete": false,  // true when ALL required params collected
-  "suggestions": ["Option 1", "Option 2", "Option 3"],  // Quick reply buttons (3-4 options)
-  "next_question": "What should I ask next?"  // Optional hint for frontend
-}
-
-═══════════════════════════════════════════════════════════════
-EXAMPLE TURNS
-═══════════════════════════════════════════════════════════════
-
-User: "I want to deploy a website"
-{
-  "message": "Awesome! 🚀 Which cloud provider would you like to use? **AWS**, **GCP**, **Azure**, or **DigitalOcean**?",
-  "extracted_params": {"workload_type": "web_server", "workload_description": "website"},
+  "message": "Your 4-5 line README-aware explanation + question...",
+  "extracted_params": { "key": "value" },
   "is_complete": false,
-  "suggestions": ["AWS", "GCP", "Azure", "DigitalOcean"]
+  "suggestions": ["Option A", "Option B"]
 }
-
-User: "AWS in us-east-1, production environment"
-{
-  "message": "Perfect! AWS `us-east-1` for production — solid choice. 💪\\n\\nHow many **EC2 instances** do you need? (I'd suggest at least **2** for high availability in production)",
-  "extracted_params": {"provider": "aws", "region": "us-east-1", "environment": "prod"},
-  "is_complete": false,
-  "suggestions": ["2 instances", "3 instances", "You choose"]
-}
-
-... continue through all stages ...
-
-Final turn (when complete):
-{
-  "message": "🎉 **All set!** Here's your infrastructure summary:\\n\\n| Component | Details |\\n|-----------|---------|\\n| **Workload** | Production web server |\\n| **Cloud** | AWS us-east-1 |\\n| **Compute** | 2x t3.small (Ubuntu 22.04) |\\n| **Storage** | 20 GB gp3 per instance |\\n| **Networking** | Ports 80, 443 (public), SSH from your IP |\\n| **Permissions** | S3 read/write, CloudWatch logs |\\n| **Monitoring** | Enabled with detailed metrics |\\n| **Est. Cost** | ~$25/month |\\n\\nI'll generate your Terraform now — you'll be able to review it before deployment! 🚀",
-  "extracted_params": {},
-  "is_complete": true,
-  "suggestions": []
-}
-
-═══════════════════════════════════════════════════════════════
-REMEMBER
-═══════════════════════════════════════════════════════════════
-- You are a PARAMETER COLLECTOR, not a Terraform generator
-- Be warm, patient, and encouraging
-- ONE question per turn
-- Extract ALL implied parameters
-- NEVER accept 0.0.0.0/0 for SSH
-- Use cloud-native terminology (EC2 vs Compute Engine vs VM vs Droplet)
-- Final summary in table format with cost estimate
- COST ESTIMATION (CRITICAL - MUST SHOW):
-1. Calculate monthly cost based on cloud provider:
-
-   AWS Pricing:
-   - Compute: instance_type × instance_count × hourly_rate × 730 hours
-     Examples: t3.micro=$0.0104/hr, t3.small=$0.0208/hr, t3.medium=$0.0416/hr
-   - Storage: storage_size_gb × $0.10/GB/month (gp3) or $0.08/GB (gp2)
-   - Load Balancer: $16.20/month (ALB) or $22/month (NLB) if enabled
-   - Data transfer: First 100 GB free, then $0.09/GB
-
-   GCP Pricing:
-   - Compute: e2-micro=$0.008/hr, e2-small=$0.033/hr, e2-medium=$0.067/hr
-   - Storage: $0.17/GB/month (pd-standard), $0.10/GB (pd-balanced)
-   - Load Balancer: ~$18/month
-
-   Azure Pricing:
-   - Compute: B1s=$0.0104/hr, B2s=$0.0416/hr (similar to AWS)
-   - Storage: $0.05/GB/month (Standard HDD), $0.12/GB (Standard SSD)
-
-   DigitalOcean Pricing:
-   - Droplets: Basic droplets from $4/month (512MB), $6/month (1GB), $12/month (2GB)
-   - Storage: $0.10/GB/month
-
-2. Show detailed breakdown in this EXACT format:
-
- **Estimated Monthly Cost: $XX.XX**
-
-**Breakdown:**
-• Compute: {instance_count} × {instance_type} × 730 hrs = **${compute_cost}**
-• Storage: {storage_size_gb} GB × ${storage_rate}/GB = **${storage_cost}**
-• Load Balancer: **${lb_cost}** (if enabled, else $0.00)
-• Data Transfer: ~**${transfer_cost}** (estimated 100 GB/month)
-
-**Total: ${total_cost}/month**
-
-3. Then show ✅ summary of ALL params grouped by stage.
-
-═══════════════════════════════════════════════════════════════
-FEW-SHOT EXAMPLES
-═══════════════════════════════════════════════════════════════
-
---- Turn 1 ---
-User: "I want to deploy a website"
-{
-  "message": "Awesome, let's get your website up and running! 🚀\\n\\nTo recommend the best setup, could you tell me a bit about it? For example:\\n• Is it a **static site** (HTML/CSS) or a **dynamic app** (Node.js, Python, PHP)?\\n• Is this for **production** (real users) or **development/testing**?",
-  "thinking": "Stage 1: Got workload_type=web_server. Need workload_description and environment.",
-  "current_stage": 1,
-  "extracted_params": {"workload_type": "web_server"},
-  "next_question": "workload_details",
-  "is_complete": false,
-  "suggestions": ["Static site (HTML/CSS)", "Node.js app", "Python/Django app", "It's for production"],
-  "aws_mcp_query": "list_instance_types web_server us-east-1"
-}
-
---- Turn 2 ---
-User: "It's a Node.js app for production, it stores files in S3"
-{
-  "message": "Great choice! A **production Node.js app with S3 storage** — I know exactly what you need.\\n\\nFor production I recommend **2 instances** across multiple availability zones (so if one goes down, the other keeps running). A **t3.small** (2 vCPU, 2 GB RAM, ~$15/mo each) handles moderate Node.js traffic well.\\n\\nDoes that sound right, or do you expect heavier traffic?",
-  "thinking": "Stage 1 done. Stage 2: inferred S3 IAM perms. Need to confirm instance_count, instance_type, region, ami_os.",
-  "current_stage": 2,
-  "extracted_params": {
-    "workload_description": "Node.js web app with S3 file uploads",
-    "environment": "prod",
-    "iam_services": {"s3": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"]}
-  },
-  "next_question": "instance_count_and_type",
-  "is_complete": false,
-  "suggestions": ["2 × t3.small sounds good", "I need larger instances", "Just 1 for now", "3+ for high traffic"],
-  "aws_mcp_query": "recommend web_server moderate us-east-1"
-}
-
---- Turn 3 ---
-User: "2 t3.small, us-east-1, Ubuntu"
-{
-  "message": "Perfect! **2 × t3.small** in **us-east-1** running **Ubuntu 22.04** 👍\\n\\nFor storage I'll set up a **20 GB gp3** encrypted volume (fast and cost-effective). Want to change the size or type, or are defaults fine?",
-  "thinking": "Stage 2 done. Stage 3: need storage confirmation.",
-  "current_stage": 3,
-  "extracted_params": {"instance_count": 2, "instance_type": "t3.small", "region": "us-east-1", "ami_os": "ubuntu-22.04"},
-  "next_question": "storage",
-  "is_complete": false,
-  "suggestions": ["Defaults are fine", "I need more storage", "Use io2 for high IOPS"],
-  "aws_mcp_query": "validate_instance_type t3.small us-east-1"
-}
-
---- Turn 4 ---
-User: "defaults are fine"
-{
-  "message": "Got it — **20 GB gp3 encrypted** ✅\\n\\nNow for security: your web app needs **ports 80** (HTTP) and **443** (HTTPS) open to the internet. I'll also set up SSH access — but only from YOUR IP for security.\\n\\n**What's your IP address or office/VPN range?** (e.g., 203.0.113.50/32)",
-  "thinking": "Stage 3 done. Stage 4: web→ports 80,443. Need SSH CIDR.",
-  "current_stage": 4,
-  "extracted_params": {"storage_size_gb": 20, "storage_type": "gp3"},
-  "next_question": "ssh_cidr",
-  "is_complete": false,
-  "suggestions": ["My IP is (I'll type it)", "Use 10.0.0.0/8 (VPN)", "I'll use SSM instead of SSH"],
-  "aws_mcp_query": null
-}
-
---- Turn 5 ---
-User: "203.0.113.50/32, and add a load balancer"
-{
-  "message": "I'll set up an **Application Load Balancer** distributing traffic to both instances with HTTP→HTTPS redirect 🔒\\n\\nSecurity groups:\\n• Ports **80 & 443** — open to internet\\n• Port **22 (SSH)** — only from **203.0.113.50/32**\\n\\nSince your app uses S3, I've already noted those permissions. Does it need access to any **other AWS services** — like RDS, DynamoDB, SQS, or Secrets Manager?",
-  "thinking": "Stage 4 done. Stage 5: have s3 perms. Ask about additional services.",
-  "current_stage": 5,
-  "extracted_params": {
-    "ssh_allowed_cidrs": ["203.0.113.50/32"],
-    "ports": [
-      {"port": 80, "protocol": "tcp", "source_cidr": "0.0.0.0/0", "description": "HTTP"},
-      {"port": 443, "protocol": "tcp", "source_cidr": "0.0.0.0/0", "description": "HTTPS"},
-      {"port": 22, "protocol": "tcp", "source_cidr": "203.0.113.50/32", "description": "SSH"}
-    ],
-    "load_balancer_type": "application",
-    "vpc_cidr": "10.0.0.0/16", "subnet_type": "both", "subnet_count": 2, "enable_public_ip": true
-  },
-  "next_question": "iam_additional",
-  "is_complete": false,
-  "suggestions": ["Also needs RDS", "Also uses SQS", "S3 is all it needs", "Add Secrets Manager"],
-  "aws_mcp_query": null
-}
-
---- Turn 6 ---
-User: "it talks to RDS, use Secrets Manager for creds. That's all for permissions"
-{
-  "message": "I'll create a custom IAM role **web-server-prod-role** with:\\n• **S3** — read/write uploads\\n• **RDS** — database authentication\\n• **Secrets Manager** — read DB credentials\\n• **CloudWatch** — logs & metrics (always included)\\n• **SSM** — instance management (always included)\\n\\nAlmost done! For production I recommend:\\n• ✅ Detailed CloudWatch monitoring\\n• ✅ Log retention: 30 days\\n• ✅ Auto-scaling (2–6 instances, target 70% CPU)\\n• ✅ EBS backup snapshots\\n\\nShall I enable all of these?",
-  "thinking": "Stage 5 done — user said 'that's all'. Stage 6: recommend prod defaults.",
-  "current_stage": 6,
-  "extracted_params": {
-    "iam_services": {
-      "rds": ["rds-db:connect"],
-      "secretsmanager": ["secretsmanager:GetSecretValue"],
-      "cloudwatch": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "cloudwatch:PutMetricData"],
-      "ssm": ["ssm:UpdateInstanceInformation", "ssm:GetParameter"]
-    },
-    "iam_role_name": "web-server-prod-role"
-  },
-  "next_question": "monitoring_extras",
-  "is_complete": false,
-  "suggestions": ["Enable all recommended", "Skip auto-scaling", "Customize", "Just monitoring"],
-  "aws_mcp_query": null
-}
-
---- Turn 7 ---
-User: "enable all"
-{
-  "message": "Excellent! Here's your complete setup:\\n\\n✅ **Workload**: Node.js web app with S3 uploads (production)\\n✅ **Compute**: 2 × t3.small in us-east-1, Ubuntu 22.04\\n✅ **Storage**: 20 GB gp3, encrypted\\n✅ **Network**: VPC 10.0.0.0/16, public + private subnets, 2 AZs\\n✅ **Load Balancer**: Application LB with HTTPS\\n✅ **Ports**: 80, 443 (public) · 22 (203.0.113.50/32 only)\\n✅ **IAM**: web-server-prod-role (S3, RDS, Secrets Manager, CloudWatch, SSM)\\n✅ **Monitoring**: Detailed CloudWatch + 30-day logs\\n✅ **Auto-Scaling**: 2–6 instances, 70% CPU target\\n✅ **Backup**: EBS snapshots enabled\\n✅ **Security**: IMDSv2 enforced, EBS encrypted, SSH restricted\\n\\n🚀 Ready to generate your Terraform files!",
-  "thinking": "All stages complete. Checklist passes.",
-  "current_stage": 6,
-  "extracted_params": {
-    "monitoring_enabled": true, "detailed_monitoring": true,
-    "cloudwatch_logs_enabled": true, "log_retention_days": 30,
-    "auto_scaling_enabled": true, "auto_scaling_config": {"min": 2, "max": 6, "target_cpu": 70},
-    "backup_enabled": true, "enable_imdsv2": true
-  },
-  "next_question": null,
-  "is_complete": true,
-  "suggestions": [],
-  "aws_mcp_query": null
-}
-
-═══════════════════════════════════════════════════════════════
-EDGE CASES
-═══════════════════════════════════════════════════════════════
-• "I don't know" → Pick best default, explain why, confirm.
-• Multiple params in one message → Extract ALL, skip ahead.
-• "0.0.0.0/0 for SSH" → REFUSE. Explain brute-force risk. Ask for specific CIDR.
-• User asks "what options" → Use MCP query (list_instance_types, list_regions).
-• "just use defaults" → Apply all defaults, show summary, set is_complete=true.
-• User goes back to change → Update param, acknowledge, continue.
-• User asks about AWS → Answer briefly, return to collection.
 """
 
-    # ================================================================
-    # INIT
-    # ================================================================
+    FRIENDLY_BRIDGE_PROMPT = """
+**CRITICAL INSTRUCTIONS FOR EVERY RESPONSE**:
+1. **Always Reference README**: Every question MUST mention specific findings from the README.
+   - "I see your README shows..."
+   - "Your README mentions..."
+   - "Based on your [tech] stack from the README..."
+2. **Environment-Specific Questioning**:
+   - DEV: Simple, cost-focused, 4-6 questions total. Skip scaling, HA, detailed monitoring, traffic estimation.
+   - PROD: Detailed, reliability-focused, 10-12 questions total. Cover ALL critical topics.
+   - **PROD MANDATORY**: After environment is chosen, you MUST ask about traffic/user base (DAU, requests/sec) BEFORE asking about storage or other details.
+3. **Cloud-Provider-Specific Terminology**: Use the CORRECT terminology for the chosen cloud provider.
+   - AWS: EC2, RDS, ElastiCache, S3, CloudWatch, IAM Roles
+   - GCP: Compute Engine, Cloud SQL, Memorystore, Cloud Storage, Cloud Monitoring, Service Accounts
+   - Azure: Virtual Machines, Azure Database, Azure Cache, Blob Storage, Azure Monitor, Managed Identities
+   - DigitalOcean: Droplets, Managed Databases, Spaces, Block Storage
+4. **Deep Explanations**: Every question needs 4-5 lines explaining WHY we're asking and WHAT the options mean.
+5. **Suggestions**: Provide 2-3 specific, actionable options using the CORRECT cloud provider terminology.
+6. **No Skipping**: For PROD, you MUST ask about: region, traffic, HA, instance config, storage, IAM, monitoring, backups, security.
+"""
+
+    SUPPORTED_PROVIDERS = {"aws", "gcp", "azure", "digitalocean"}
+    UNKNOWN_PROVIDER = "unknown"
 
     def __init__(self) -> None:
-        """Initialize with AsyncLLMService for automatic Gemini fallback."""
-        self.sessions: Dict[str, ConversationSession] = {}
         self.llm_service = AsyncLLMService()
         self.github_service = GithubService()
-        self.openai_client = None  # Deprecated, using llm_service instead
-        
-        # MongoDB connection for session persistence
+
         try:
             from pymongo import MongoClient
-            mongo_uri = config.MONGODB_URI
-            mongo_db = config.MONGODB_DATABASE
-            if mongo_uri is not None and mongo_db is not None:
+
+            mongo_uri = getattr(config, "MONGODB_URI", None)
+            mongo_db = getattr(config, "MONGODB_DATABASE", None)
+            if mongo_uri and mongo_db:
                 client = MongoClient(mongo_uri)
                 db = client[mongo_db]
                 self.sessions_collection = db["sessions"]
-                logger.info("ConversationManager initialized with MongoDB persistence")
             else:
                 self.sessions_collection = None
-                logger.warning("MongoDB not configured - sessions will not persist")
+                logger.error("MongoDB URI/DB not configured. Chat will NOT work.")
         except Exception as e:
-            logger.error(f"Failed to connect to MongoDB: {e}")
+            logger.error("MongoDB connection failed: %s", e)
             self.sessions_collection = None
-        
-        logger.info("ConversationManager initialised")
 
-    # ================================================================
-    # SESSION MANAGEMENT
-    # ================================================================
+    # ---------------------------
+    # Provider normalization
+    # ---------------------------
+    @staticmethod
+    def _normalize_provider(provider: str) -> str:
+        """
+        Normalizes provider names and preserves 'unknown' until user selects in chat.
+        """
+        p = (provider or "").strip().lower()
+        if not p:
+            return ConversationManager.UNKNOWN_PROVIDER
 
-    async def create_session(self, provider: str = "aws", github_url: str = "", github_token: str = "", github_branch: str = "") -> Dict[str, Any]:
+        aliases = {
+            "aws": "aws",
+            "amazon": "aws",
+            "gcp": "gcp",
+            "google": "gcp",
+            "azure": "azure",
+            "do": "digitalocean",
+            "digitalocean": "digitalocean",
+            "digital-ocean": "digitalocean",
+            "unknown": "unknown",
+        }
+        p = aliases.get(p, p)
+        if p in ConversationManager.SUPPORTED_PROVIDERS:
+            return p
+        return ConversationManager.UNKNOWN_PROVIDER
+
+    # ---------------------------
+    # Session create
+    # ---------------------------
+    async def create_session(
+        self,
+        owner: str = "",
+        repo: str = "",
+        github_token: str = "",
+        github_branch: str = "",
+    ) -> Dict[str, Any]:
         """
-        Create a new session, optionally importing from a GitHub repo.
+        Creates a session WITHOUT requiring provider.
+        Provider is chosen inside chat and saved into collected_parameters.cloud_provider.
         """
+        if self.sessions_collection is None:
+            raise RuntimeError("MongoDB not available. Cannot create session.")
+
         sid = f"sess_{datetime.now():%Y%m%d_%H%M%S}_{secrets.token_hex(4)}"
-        
-        initial_params = {}
-        bot_response = (
-            "Hey there! 👋 I'm your cloud infrastructure buddy. "
-            "I'll help you deploy to **AWS, GCP, Azure, or DigitalOcean** "
-            "— no cloud expertise needed!\n\n"
-            "**What would you like to deploy?** "
-            "(e.g., a website, an API, a database server, an application)"
-        )
-        
-        # GitHub Import Logic
-        if github_url:
-            try:
-                readme_content = await self.github_service.fetch_readme(github_url, token=github_token, branch=github_branch)
-                if readme_content:
-                    # Print full README to terminal (using both logger and print for visibility)
-                    separator = f"[{sid}] {'='*60} FETCHED README FROM {github_url} {'='*60}"
-                    end_separator = f"[{sid}] {'='*60} END README (Length: {len(readme_content)} chars) {'='*60}"
-                    
-                    print(f"\n{separator}")
-                    print(readme_content)
-                    print(f"{end_separator}\n")
-                    
-                    logger.info(separator)
-                    logger.info(f"\n{readme_content}\n")
-                    logger.info(end_separator)
-                    
-                    logger.info(f"[{sid}] Analyzing README for {github_url}")
-                    analysis = await self._analyze_readme(readme_content)
-                    initial_params = analysis.get("extracted_params", {})
-                    
-                    if "message" in analysis and analysis["message"]:
-                        bot_response = analysis["message"]
-                    else:
-                        # Fallback if analysis worked but returned no message
-                        bot_response = (
-                            f"I checked out **{github_url}**, but I couldn't quite figure out the details. 😅\n\n"
-                            "**Could you tell me what you're looking to deploy?**"
-                        )
-            except Exception as e:
-                logger.error(f"Failed to import GitHub repo: {e}")
-                bot_response = (
-                    f"⚠️ I couldn't fetch the README from {github_url}. "
-                    "But no worries, we can start from scratch!\n\n"
-                    "**What would you like to deploy?**"
-                )
 
-        self.sessions[sid] = ConversationSession(
+        if not owner.strip() or not repo.strip():
+            bot_response = (
+                "Hey there! 👋 I'm TerraBot — your friendly cloud deployment guide!\n"
+                "I'll read your project's README and set up the perfect cloud infrastructure for you.\n"
+                "No cloud expertise needed — I'll ask just 10-12 smart questions and handle the rest. 🚀\n"
+                "To get started, I need your GitHub repo details.\n"
+                "What's the owner and repo name? (e.g., 'facebook' and 'react')"
+            )
+            return {"session_id": sid, "bot_response": bot_response, "suggestions": []}
+
+        # Fetch README (owner/repo). If your GithubService only supports repo_url, we fallback.
+        readme_content = ""
+        try:
+            readme_content = await self.github_service.fetch_readme(
+                owner=owner,
+                repo=repo,
+                token=github_token,
+                branch=github_branch,
+            )
+        except TypeError:
+            repo_url = f"https://github.com/{owner}/{repo}"
+            readme_content = await self.github_service.fetch_readme(
+                repo_url=repo_url,
+                token=github_token,
+                branch=github_branch,
+            )
+        except Exception as e:
+            logger.error("[%s] README fetch failed for %s/%s: %s", sid, owner, repo, e, exc_info=True)
+            readme_content = ""
+
+        if not readme_content.strip():
+            logger.warning("[%s] README is empty/missing for %s/%s", sid, owner, repo)
+            bot_response = (
+                f"Hmm 🤔 I tried fetching the README for **{owner}/{repo}** but came up empty.\n"
+                "This could happen if the repo is private (I'd need a GitHub token with repo access).\n"
+                "Or maybe the README is on a different branch?\n"
+                "Don't worry — we can fix this easily!\n"
+                "Would you like to retry with a token or specify a different branch?"
+            )
+            return {
+                "session_id": sid,
+                "bot_response": bot_response,
+                "suggestions": ["Retry with token", "Change branch"],
+            }
+
+        logger.info("--------------------------------------------------")
+        logger.info("[%s] FETCHED README (%d chars):\n%s", sid, len(readme_content), readme_content[:2000])
+        if len(readme_content) > 2000:
+            logger.info("... (truncated remaining %d chars) ...", len(readme_content) - 2000)
+        logger.info("--------------------------------------------------")
+
+        analysis = await self._analyze_readme(readme_content)
+        extracted = analysis.get("extracted_params", {}) if isinstance(analysis, dict) else {}
+        greeting = str(analysis.get("message") or "") if isinstance(analysis, dict) else ""
+        
+        logger.info("[%s] README ANALYSIS:\n%s", sid, json.dumps(extracted, indent=2))
+
+        # Seed minimal cross-provider fields (NO cloud_provider here)
+        extracted["github_owner"] = owner
+        extracted["github_repo"] = repo
+        if github_branch:
+            extracted["github_branch"] = github_branch
+
+        extracted["readme_context"] = self._build_readme_context(readme_content, extracted, owner, repo)
+
+        # Force provider to remain unknown until user chooses
+        extracted.setdefault("cloud_provider", self.UNKNOWN_PROVIDER)
+
+        bot_response = self._normalize_bot_message(greeting, is_complete=False)
+
+        session = ConversationSession(
             session_id=sid,
-            provider=provider,
+            provider=self.UNKNOWN_PROVIDER,
             messages=[],
-            collected_parameters=initial_params,
+            collected_parameters=extracted,
             is_complete=False,
             status=ConversationStatus.ACTIVE,
         )
-        
-        # Persist to MongoDB
-        if self.sessions_collection is not None:
-            try:
-                self.sessions_collection.insert_one(self.sessions[sid].dict())
-            except Exception as e:
-                logger.error(f"Failed to persist session {sid}: {e}")
-                
-        logger.info("Created session: %s", sid)
+
+        try:
+            self.sessions_collection.insert_one(session.dict())
+            logger.info("[%s] Session created and saved to MongoDB", sid)
+        except Exception as e:
+            logger.error("Failed to persist session %s: %s", sid, e)
+            raise RuntimeError(f"Failed to save session to MongoDB: {e}")
+
         return {
             "session_id": sid,
-            "bot_response": bot_response,  # Use the bot_response variable (includes GitHub analysis if provided)
-            "suggestions": [
-                "A website",
-                "An API backend",
-                "A database server",
-                "A web application",
-                "You choose for me",
-            ],
+            "bot_response": bot_response,
+            "suggestions": ["AWS", "GCP", "Azure", "DigitalOcean"],
         }
 
     def get_session(self, sid: str) -> Optional[ConversationSession]:
-        return self.sessions.get(sid)
+        if self.sessions_collection is None:
+            logger.error("MongoDB not available. Cannot get session.")
+            return None
 
-    # ================================================================
-    # MESSAGE PROCESSING
-    # ================================================================
+        try:
+            data = self.sessions_collection.find_one({"session_id": sid})
+            if data:
+                if "_id" in data:
+                    del data["_id"]
+                return ConversationSession(**data)
+        except Exception as e:
+            logger.error("Failed to fetch session %s from MongoDB: %s", sid, e)
+        
+        return None
 
-    async def process_message(
-        self, session_id: str, user_message: str
-    ) -> ChatMessageResponse:
+    # ---------------------------
+    # Message handling
+    # ---------------------------
+    async def process_message(self, session_id: str, user_message: str) -> ChatMessageResponse:
+        logger.info("[%s] User Message: %s", session_id, user_message)
+
         session = self.get_session(session_id)
         if not session:
+            # If session not found, we can't process message.
+            # Caller handles the 404 from get_session or here.
             raise ValueError(f"Session {session_id} not found")
+        
         if session.status != ConversationStatus.ACTIVE:
-            raise ValueError(
-                f"Session {session_id} not active (status: {session.status})"
-            )
+            raise ValueError(f"Session {session_id} not active")
 
         session.messages.append({"role": "user", "content": user_message})
-        raw = await self._call_llm(session)
 
+        raw = await self._call_llm(session)
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
-            logger.error("LLM JSON parse failed: %s", raw[:300])
             data = {
-                "message": "Sorry, could you rephrase that? I hit a hiccup 😅",
+                "message": (
+                    "Oops! 😅 I had a small hiccup processing that.\n"
+                    "No worries — your README context is still my guide.\n"
+                    "Let me get back on track with our deployment planning.\n"
+                    "Could you repeat your last answer in a short line?\n"
+                    "I want to make sure I capture it correctly! 🎯"
+                ),
                 "extracted_params": {},
                 "suggestions": [],
                 "is_complete": False,
             }
 
-        # Normalize field types
         data.setdefault("message", "Could you tell me a bit more?")
         data.setdefault("extracted_params", {})
         data.setdefault("suggestions", [])
         data.setdefault("is_complete", False)
+
         if not isinstance(data["extracted_params"], dict):
             data["extracted_params"] = {}
-        if not isinstance(data["suggestions"], list):
-            data["suggestions"] = []
 
-        # Deep-merge extracted params
-        self._deep_merge(
-            session.collected_parameters, data["extracted_params"]
-        )
+        self._deep_merge(session.collected_parameters, data["extracted_params"])
+
+        # ✅ keep 'unknown' until user explicitly chooses
+        chosen = str(session.collected_parameters.get("cloud_provider") or session.provider or self.UNKNOWN_PROVIDER)
+        provider_norm = self._normalize_provider(chosen)
+
+        session.provider = provider_norm
+        # only stamp cloud_provider when it's actually supported
+        if provider_norm in self.SUPPORTED_PROVIDERS:
+            session.collected_parameters["cloud_provider"] = provider_norm
+        else:
+            session.collected_parameters["cloud_provider"] = self.UNKNOWN_PROVIDER
+
         session.is_complete = bool(data["is_complete"])
         session.updated_at = datetime.now()
 
         if session.is_complete:
-            self._apply_defaults(session.collected_parameters)
-            session.status = ConversationStatus.COMPLETE
-            
-            # Inject cost calculation into the message
-            cost_breakdown = self._calculate_cost(session.collected_parameters)
-            if cost_breakdown and "💰" not in data["message"]:
-                data["message"] = cost_breakdown + data["message"]
-            
-            logger.info(
-                "[%s] Complete – %d params",
-                session_id,
-                len(session.collected_parameters),
-            )
+            # Hard safety: completion cannot happen without provider choice.
+            if session.provider not in self.SUPPORTED_PROVIDERS:
+                session.is_complete = False
+                data["is_complete"] = False
+                data["message"] = self._normalize_bot_message(
+                    "Hold on! ☁️ Before I can generate your Terraform, I need to know which cloud platform you'd like.\n"
+                    "This is crucial because each provider has different resources and pricing.\n"
+                    "Based on your project, any of these would work great!\n"
+                    "I just need you to pick your favorite.\n"
+                    "Which cloud platform would you like: AWS, GCP, Azure, or DigitalOcean? 🎯",
+                    is_complete=False,
+                )
+                data["suggestions"] = ["AWS", "GCP", "Azure", "DigitalOcean"]
+            else:
+                self._apply_defaults(session.collected_parameters, provider=session.provider)
+                session.status = ConversationStatus.COMPLETE
 
-        session.messages.append(
-            {"role": "assistant", "content": data["message"]}
-        )
-        
-        # Update MongoDB
+                cost_block = self._calculate_cost(session.collected_parameters, provider=session.provider)
+                final_msg = f"{cost_block}\nAll set! I'll generate your Terraform configuration now."
+                data["message"] = self._normalize_bot_message(final_msg, is_complete=True)
+        else:
+            data["message"] = self._normalize_bot_message(data["message"], is_complete=False)
+
+        session.messages.append({"role": "assistant", "content": data["message"]})
+        logger.info("[%s] Bot Response:\n%s", session_id, data["message"])
+        logger.info("[%s] Collected Params: %s", session_id, json.dumps(session.collected_parameters, indent=2))
+
         if self.sessions_collection is not None:
             try:
                 self.sessions_collection.update_one(
                     {"session_id": session_id},
-                    {
-                        "$set": {
-                            "messages": session.messages,
-                            "collected_parameters": session.collected_parameters,
-                            "is_complete": session.is_complete,
-                            "status": session.status,
-                            "updated_at": session.updated_at
-                        }
-                    }
+                    {"$set": session.dict(exclude={"_id"})},
+                    upsert=True
                 )
             except Exception as e:
-                logger.error(f"Failed to update session {session_id}: {e}")
+                logger.error("Failed to update session %s: %s", session_id, e)
 
         return ChatMessageResponse(
             session_id=session_id,
@@ -572,409 +479,630 @@ EDGE CASES
             next_question=data.get("next_question"),
         )
 
-    # ================================================================
-    # LLM CALL
-    # ================================================================
-
-    async def _call_llm(self, session: ConversationSession) -> str:
-        snapshot = json.dumps(session.collected_parameters, indent=2)
-        context = (
-            f"\n\n[Collected so far: {snapshot}]\n"
-            f"[Provider: {session.provider.upper()}] "
-            f"[Turns: {len(session.messages)}]"
-        )
-
-        messages = [
-            {"role": "system", "content": self.SYSTEM_PROMPT + context}
-        ]
-        for msg in session.messages:
-            if msg["role"] in ("user", "assistant"):
-                messages.append(
-                    {"role": msg["role"], "content": msg["content"]}
-                )
-
-        try:
-            # Use LLM service with automatic Gemini fallback
-            body = await self.llm_service.chat_completion(
-                messages=messages,
-                temperature=0.15,
-                max_tokens=1200,
-                response_format={"type": "json_object"},
-                timeout=30,
-            )
-            data = json.loads(body)
-
-            return json.dumps(data)
-        except json.JSONDecodeError as e:
-            logger.error("Failed to parse LLM JSON: %s", e)
-            return json.dumps({
-                "message": "Could you rephrase that? I couldn't understand.",
-                "extracted_params": {},
-                "suggestions": [],
-                "is_complete": False,
-                "current_stage": 1,
-            })
-        except Exception:
-            logger.exception("LLM call failed (both OpenAI and Gemini)")
-            raise
-
-    # ================================================================
-    # BUILD TERRAFORM REQUEST (conversation → LLMGenerator)
-    # ================================================================
-
-    def build_terraform_request(self, session_id: str) -> Dict[str, Any]:
-        """
-        Build structured dict that LLMGenerator.generate_terraform() expects.
-
-        Maps conversation param names → generator param names.
-        Called by main.py after conversation is complete.
-        """
-        session = self.get_session(session_id)
-        if not session or not session.is_complete:
-            raise ValueError("Session not found or incomplete")
-
-        p = dict(session.collected_parameters)
-
-        return {
-            # ── Keys LLMGenerator._build_structured_prompt() reads ──
-            "terraform_resource_type": "aws_instance",
-            "resource_description": "EC2 instance",
-            "service_type": p.get("workload_type", "web_server"),
-            "cloud_provider": session.provider or "aws",
-            "environment": p.get("environment", "dev"),
-            "instance_count": p.get("instance_count", 1),
-            "instance_type": p.get("instance_type", "t3.micro"),
-            "region": p.get("region", "us-east-1"),
-            "os_image": p.get("ami_os", "ubuntu-22.04"),
-            "storage_size": p.get("storage_size_gb", 20),
-            "storage_type": p.get("storage_type", "gp3"),
-            "database_type": "none",
-            # ── Rich context for better Terraform generation ──
-            "workload_description": p.get("workload_description", ""),
-            "vpc_cidr": p.get("vpc_cidr", "10.0.0.0/16"),
-            "subnet_type": p.get("subnet_type", "both"),
-            "subnet_count": p.get("subnet_count", 2),
-            "enable_public_ip": p.get("enable_public_ip", True),
-            "ports": p.get("ports", []),
-            "ssh_allowed_cidrs": p.get("ssh_allowed_cidrs", []),
-            "load_balancer_type": p.get("load_balancer_type", "none"),
-            "enable_https": p.get("enable_https", False),
-            "iam_services": p.get("iam_services", {}),
-            "iam_role_name": p.get("iam_role_name", ""),
-            "monitoring_enabled": p.get("monitoring_enabled", True),
-            "detailed_monitoring": p.get("detailed_monitoring", False),
-            "cloudwatch_logs_enabled": p.get(
-                "cloudwatch_logs_enabled", True
-            ),
-            "log_retention_days": p.get("log_retention_days", 30),
-            "auto_scaling_enabled": p.get("auto_scaling_enabled", False),
-            "auto_scaling_config": p.get("auto_scaling_config"),
-            "backup_enabled": p.get("backup_enabled", False),
-            "enable_imdsv2": p.get("enable_imdsv2", True),
-            "storage_encrypted": p.get("storage_encrypted", True),
-        }
-
-    async def _analyze_readme(self, readme_content: str) -> Dict[str, Any]:
-        """
-        Analyze a README using LLM to extract initial parameters.
-        Returns a dict with 'extracted_params' and custom 'message'.
-        """
-        prompt = (
-            "You are an expert Cloud Architect analyzing a GitHub README to understand infrastructure requirements.\n\n"
-            "Extract as much detail as possible to enable context-aware conversation:\n\n"
-            "1. 'extracted_params': Dict with:\n"
-            "   - workload_type: web_server|api|app_server|database|batch|custom\n"
-            "   - workload_description: Detailed 2-3 sentence summary of what the project does\n"
-            "   - language: Primary programming language/framework (e.g., 'Python/Flask', 'Node.js/Express', 'React')\n"
-            "   - ports: Array of {port, protocol, description} if mentioned\n"
-            "   - database: Database type if mentioned (postgres, mysql, mongodb, redis, etc.)\n"
-            "   - dependencies: List of key services/tools mentioned (S3, Docker, Kubernetes, etc.)\n"
-            "   - environment_hints: Any hints about dev/staging/prod requirements\n\n"
-            "2. 'message': A warm, personalized greeting that:\n"
-            "   - Acknowledges the specific project by name/purpose\n"
-            "   - References the tech stack you identified\n"
-            "   - Asks the FIRST relevant question based on what you learned\n"
-            "   - Example: 'I see you're building a spam detection API using Python and scikit-learn! 🎯 "
-            "To get this deployed, which cloud provider would you prefer: AWS, GCP, Azure, or DigitalOcean?'\n\n"
-            "3. 'suggestions': Array of 3-4 smart suggestions based on the README context\n\n"
-            "CRITICAL: Return ONLY valid, parseable JSON. Do not include markdown formatting (```json). "
-            "Escape all special characters in strings. "
-            "DO NOT use unescaped newlines within strings; use \\n instead.\n\n"
-            f"README CONTENT:\n{readme_content[:15000]}"  # Truncate to avoid token limits
-        )
-        
-        try:
-            raw = await self.llm_service.chat_completion(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                response_format={"type": "json_object"}
-            )
-            
-            # Clean up potential markdown formatting
-            if "```" in raw:
-                raw = raw.replace("```json", "").replace("```", "").strip()
-            
-            # LOGGING: Print RAW LLM response for debugging
-            logger.debug(f"RAW LLM RESPONSE:\n{raw}")
-
-            try:
-                # Use strict=False to allow control characters (like newlines) inside strings
-                return json.loads(raw, strict=False)
-            except json.JSONDecodeError:
-                # Fallback: Try ast.literal_eval for single-quoted keys/values (Python dict format)
-                import ast
-                try:
-                    logger.warning("JSON parse failed, trying ast.literal_eval fallback...")
-                    return ast.literal_eval(raw)
-                except Exception as e:
-                    logger.error(f"Fallback parsing also failed: {e}")
-                    raise # Re-raise original or new error to be caught by outer try/except
-            return {}
-        except Exception as e:
-            logger.error(f"README analysis failed with error: {str(e)}", exc_info=True)
-            return {}
-
-    # ================================================================
-    # HELPERS
-    # ================================================================
-
-    @staticmethod
-    def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> None:
-        """Recursively merge overlay into base in place."""
-        for key, value in overlay.items():
-            if (
-                key in base
-                and isinstance(base[key], dict)
-                and isinstance(value, dict)
-            ):
-                ConversationManager._deep_merge(base[key], value)
-            else:
-                base[key] = value
-
-    @staticmethod
-    def _apply_defaults(params: Dict[str, Any]) -> None:
-        """Fill missing params with secure, environment-aware defaults."""
-        is_prod = params.get("environment") == "prod"
-        multi = params.get("instance_count", 1) > 1
-
-        defaults: Dict[str, Any] = {
-            "vpc_cidr": "10.0.0.0/16",
-            "subnet_type": "both",
-            "subnet_count": 2,
-            "enable_public_ip": True,
-            "storage_encrypted": True,
-            "storage_size_gb": 20,
-            "storage_type": "gp3",
-            "load_balancer_type": (
-                "application" if is_prod and multi else "none"
-            ),
-            "enable_https": is_prod and multi,
-            "detailed_monitoring": is_prod,
-            "cloudwatch_logs_enabled": True,
-            "log_retention_days": 30,
-            "monitoring_enabled": True,
-            "auto_scaling_enabled": False,
-            "backup_enabled": False,
-            "enable_imdsv2": True,
-        }
-        for key, value in defaults.items():
-            params.setdefault(key, value)
-
-        # Ensure baseline IAM services always present
-        iam = params.setdefault("iam_services", {})
-        iam.setdefault(
-            "cloudwatch",
-            [
-                "logs:CreateLogGroup",
-                "logs:CreateLogStream",
-                "logs:PutLogEvents",
-                "cloudwatch:PutMetricData",
-            ],
-        )
-        iam.setdefault(
-            "ssm",
-            [
-                "ssm:UpdateInstanceInformation",
-                "ssm:GetParameter",
-            ],
-        )
-
-    # ================================================================
-    # PARAMETER RETRIEVAL
-    # ================================================================
-
+    # ---------------------------
+    # REQUIRED METHODS for main.py
+    # ---------------------------
     def get_collected_parameters(self, session_id: str) -> Dict[str, Any]:
         session = self.get_session(session_id)
         if not session:
-            raise ValueError(f"Session {session_id} not found")
-        return session.collected_parameters
+            return {}
+        return dict(session.collected_parameters or {})
 
-    def is_session_complete(self, session_id: str) -> bool:
+    def add_run_to_session(self, session_id: str, run_id: str) -> None:
         session = self.get_session(session_id)
-        return session.is_complete if session else False
+        if not session:
+            return
+        params = session.collected_parameters or {}
+        runs = params.get("run_ids")
+        if not isinstance(runs, list):
+            runs = []
+        if run_id and run_id not in runs:
+            runs.append(run_id)
+        params["run_ids"] = runs
+        session.collected_parameters = params
+        session.updated_at = datetime.now()
 
-    # ================================================================
-    # COST CALCULATION
-    # ================================================================
-
-    def _calculate_cost(self, params: dict) -> str:
-        """Calculate estimated monthly cost and return formatted string."""
-        try:
-            instance_count = params.get("instance_count", 1)
-            instance_type = params.get("instance_type", "t3.micro")
-            storage_size = params.get("storage_size_gb", 20)
-            storage_type = params.get("storage_type", "gp3")
-            lb_type = params.get("load_balancer_type", "none")
-            
-            # AWS pricing (simplified)
-            instance_prices = {
-                "t3.micro": 0.0104, "t3.small": 0.0208, "t3.medium": 0.0416,
-                "t3.large": 0.0832, "t3.xlarge": 0.1664,
-                "t2.micro": 0.0116, "t2.small": 0.023, "t2.medium": 0.0464,
-            }
-            storage_prices = {"gp3": 0.08, "gp2": 0.10, "io2": 0.125}
-            lb_prices = {"application": 16.20, "network": 22.00, "none": 0.00}
-            
-            hourly_rate = instance_prices.get(instance_type, 0.02)
-            storage_rate = storage_prices.get(storage_type, 0.08)
-            lb_cost = lb_prices.get(lb_type, 0.00)
-            
-            compute_cost = instance_count * hourly_rate * 730
-            storage_cost = storage_size * storage_rate
-            total_cost = compute_cost + storage_cost + lb_cost
-            
-            cost_breakdown = f"""
-💰 **Estimated Monthly Cost: ${total_cost:.2f}**
-
-**Breakdown:**
-• Compute: {instance_count} × {instance_type} × 730 hrs = **${compute_cost:.2f}**
-• Storage: {storage_size} GB {storage_type} = **${storage_cost:.2f}**
-• Load Balancer: **${lb_cost:.2f}**
-
-**Total: ~${total_cost:.2f}/month**
-
-*Actual costs may vary based on usage, region, and data transfer.*
-
----
-
-"""
-            return cost_breakdown
-        except Exception as e:
-            logger.error(f"Cost calculation failed: {e}")
-            return ""
-
-    # ================================================================
-    # SESSION LISTING & DELETION
-    # ================================================================
+        if self.sessions_collection is not None:
+            try:
+                self.sessions_collection.update_one(
+                    {"session_id": session_id},
+                    {"$set": {"collected_parameters": session.collected_parameters, "updated_at": session.updated_at}},
+                )
+            except Exception as e:
+                logger.error("Failed to link run to session %s: %s", session_id, e)
 
     def list_sessions(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """List recent sessions for the sidebar history."""
+        limit = max(1, min(int(limit or 20), 100))
+
         if self.sessions_collection is None:
-            # Fallback to in-memory sessions
-            sessions_list = []
-            for sid, session in list(self.sessions.items())[:limit]:
-                title = "New Conversation"
-                if session.messages:
-                    for msg in session.messages:
-                        if msg.get("role") == "user":
-                            content = msg.get("content", "")
-                            title = (content[:30] + "...") if len(content) > 30 else content
-                            break
-                
-                sessions_list.append({
-                    "session_id": sid,
-                    "title": title,
-                    "workload_type": session.collected_parameters.get("workload_type", ""),
-                    "provider": session.provider,
-                    "updated_at": datetime.now().isoformat(),
-                    "created_at": datetime.now().isoformat()
-                })
-            return sessions_list
-        
+            logger.error("MongoDB not available. Cannot list sessions.")
+            return []
+
         try:
-            cursor = self.sessions_collection.find(
-                {}, 
-                {"session_id": 1, "messages": 1, "collected_parameters": 1, "provider": 1, "updated_at": 1, "created_at": 1}
-            ).sort("updated_at", -1).limit(limit)
-            
-            sessions = []
-            for doc in cursor:
-                params = doc.get("collected_parameters", {})
-                created = doc.get("created_at")
-                
-                # Build descriptive title
-                workload = params.get("workload_description", "")
-                workload_type = params.get("workload_type", "")
-                provider = params.get("cloud_provider") or doc.get("provider", "")
-                
-                if workload:
-                    title = workload[:40] + "..." if len(workload) > 40 else workload
-                elif workload_type:
-                    title = workload_type.replace("_", " ").title()
-                else:
-                    messages = doc.get("messages", [])
-                    for msg in messages:
-                        if msg.get("role") == "user":
-                            content = msg.get("content", "")
-                            title = (content[:30] + "...") if len(content) > 30 else content
-                            break
-                    else:
-                        title = "New Conversation"
-                
-                if provider:
-                    title = f"{title} ({provider.upper()})"
-                
-                if created:
-                    date_str = created.strftime("%b %d")
-                    title = f"{title} - {date_str}"
-                
-                sessions.append({
-                    "session_id": doc["session_id"],
-                    "title": title,
-                    "updated_at": doc.get("updated_at", doc.get("created_at")).isoformat(),
-                    "created_at": doc.get("created_at").isoformat(),
-                    "workload_type": workload_type,
-                    "provider": provider
+            docs = list(
+                self.sessions_collection.find(
+                    {},
+                    {
+                        "_id": 0,
+                        "session_id": 1,
+                        "provider": 1,
+                        "status": 1,
+                        "is_complete": 1,
+                        "updated_at": 1,
+                        "created_at": 1,
+                        "collected_parameters.github_owner": 1,
+                        "collected_parameters.github_repo": 1,
+                    }
+                ).sort("updated_at", -1).limit(limit)
+            )
+            out = []
+            for d in docs:
+                cp = (d.get("collected_parameters") or {})
+                out.append({
+                    "session_id": d.get("session_id"),
+                    "provider": d.get("provider") or self.UNKNOWN_PROVIDER,
+                    "status": d.get("status"),
+                    "is_complete": d.get("is_complete", False),
+                    "updated_at": str(d.get("updated_at") or ""),
+                    "repo": f"{cp.get('github_owner','')}/{cp.get('github_repo','')}".strip("/"),
                 })
-            return sessions
+            return out
         except Exception as e:
-            logger.error(f"Failed to list sessions: {e}")
+            logger.error("Mongo list_sessions failed: %s", e)
             return []
 
     def delete_session(self, session_id: str) -> bool:
-        """Delete a session from storage."""
-        # Remove from in-memory
-        if session_id in self.sessions:
-            del self.sessions[session_id]
-        
-        # Remove from MongoDB if available
-        if self.sessions_collection is not None:
-            try:
-                result = self.sessions_collection.delete_one({"session_id": session_id})
-                return result.deleted_count > 0
-            except Exception as e:
-                logger.error(f"Failed to delete session {session_id}: {e}")
-                return False
-        return True
+        if self.sessions_collection is None:
+            return False
 
-    def add_run_to_session(self, session_id: str, run_id: str) -> None:
-        """Link a run ID to a session."""
+        try:
+            res = self.sessions_collection.delete_one({"session_id": session_id})
+            return bool(res.deleted_count)
+        except Exception as e:
+            logger.error("Failed to delete session %s from mongo: %s", session_id, e)
+            return False
+
+    def build_terraform_request(self, session_id: str) -> Dict[str, Any]:
+        """
+        Returns structured params dict for LLMGenerator.generate_terraform(params, provider).
+
+        IMPORTANT:
+        - Provider MUST be chosen in chat before this is called.
+        """
         session = self.get_session(session_id)
-        if session:
-            if not hasattr(session, "run_ids"):
-                session.run_ids = []
-            session.run_ids.append(run_id)
-            session.updated_at = datetime.now()
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        p = dict(session.collected_parameters or {})
+        provider = self._normalize_provider(str(p.get("cloud_provider") or session.provider or self.UNKNOWN_PROVIDER))
+
+        if provider not in self.SUPPORTED_PROVIDERS:
+            raise ValueError(
+                f"Cloud provider not chosen yet. Please pick one of: {sorted(self.SUPPORTED_PROVIDERS)}"
+            )
+
+        p["cloud_provider"] = provider
+
+        # Ensure defaults applied even if caller triggers generation immediately
+        self._apply_defaults(p, provider=provider)
+
+        params: Dict[str, Any] = {
+            "cloud_provider": provider,
+            "environment": p.get("environment", "dev"),
+            "workload_description": p.get("workload_description") or p.get("service_type") or "web server",
+            "language": p.get("language", "Not specified"),
+            "dependencies": p.get("dependencies", []),
+            "ports": p.get("ports", []),
+            "ssh_allowed_cidrs": p.get("ssh_allowed_cidrs", []),
+            "instance_type": p.get("instance_type"),
+            "instance_count": p.get("instance_count", 1),
+            "storage_size_gb": p.get("storage_size_gb", 20),
+            "storage_type": p.get("storage_type"),
+            "vpc_cidr": p.get("vpc_cidr", "10.0.0.0/16"),
+            "subnet_count": p.get("subnet_count", 2),
+            "enable_public_ip": p.get("enable_public_ip", True),
+            "os_image": p.get("os_image") or p.get("ami_os") or "ubuntu-22.04",
+            "project_name": p.get("project_name") or p.get("github_repo") or "app",
+            "readme_context": p.get("readme_context", ""),
+            # Enhanced fields for intelligent Terraform generation
+            "github_owner": p.get("github_owner", ""),
+            "github_repo": p.get("github_repo", ""),
+            "has_docker": p.get("has_docker", False),
+            "database_type": p.get("database_type", "none"),
+            "has_database": p.get("has_database", False),
+        }
+
+        if provider == "aws":
+            params["aws_region"] = p.get("aws_region") or p.get("region") or "us-east-1"
+            params["region"] = params["aws_region"]
+            params["iam_services"] = p.get("iam_services", {})
+            params["load_balancer_type"] = p.get("load_balancer_type", "none")
+            params["enable_https"] = p.get("enable_https", False)
+
+        elif provider == "gcp":
+            params["gcp_project_id"] = p.get("gcp_project_id") or ""
+            params["gcp_region"] = p.get("gcp_region") or p.get("region") or "us-central1"
+            params["region"] = params["gcp_region"]
+            params["ssh_username"] = p.get("ssh_username") or "ubuntu"
+            if params["os_image"] in ("ubuntu-22.04", "ubuntu-2204", "ubuntu"):
+                params["os_image"] = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
+
+        elif provider == "azure":
+            params["azure_location"] = p.get("azure_location") or p.get("region") or "eastus"
+            params["region"] = params["azure_location"]
+            params["ssh_username"] = p.get("ssh_username") or "azureuser"
+
+        else:  # digitalocean
+            params["do_region"] = p.get("do_region") or p.get("region") or "nyc1"
+            params["region"] = params["do_region"]
+            if params["os_image"] in ("ubuntu-22.04", "ubuntu-2204", "ubuntu"):
+                params["os_image"] = "ubuntu-22-04-x64"
+
+        # Never allow empty/non-list SSH CIDRs; keep empty so LLM asks (DO NOT fill 0.0.0.0/0).
+        if not isinstance(params.get("ssh_allowed_cidrs"), list):
+            params["ssh_allowed_cidrs"] = []
+        params["ssh_allowed_cidrs"] = [c for c in params["ssh_allowed_cidrs"] if isinstance(c, str) and c.strip()]
+
+        return params
+
+    # ---------------------------
+    # LLM call
+    # ---------------------------
+    async def _call_llm(self, session: ConversationSession) -> str:
+        snapshot = json.dumps(session.collected_parameters, indent=2)
+        readme_ctx = str(session.collected_parameters.get("readme_context") or "")[:3500]
+
+        # Count user turns (questions asked so far)
+        user_turns = sum(1 for m in session.messages if m.get("role") == "user")
+        
+        # Detect environment early
+        environment = str(session.collected_parameters.get("environment") or "").lower()
+        is_dev = environment in ("dev", "development")
+        is_prod = environment in ("prod", "production")
+        
+        # Environment-specific question targets
+        if is_dev:
+            total_questions_target = 6  # Dev: 4-6 questions
+            min_questions = 4
+        elif is_prod:
+            total_questions_target = 12  # Prod: 10-12 questions
+            min_questions = 10
+        else:
+            # Environment not yet chosen
+            total_questions_target = 12
+            min_questions = 10
+
+        turn_guidance = ""
+        
+        # Check if cloud provider has been chosen
+        cloud_provider = str(session.collected_parameters.get("cloud_provider") or "").lower()
+        has_cloud_provider = cloud_provider in ("aws", "gcp", "azure", "digitalocean")
+        
+        if not has_cloud_provider:
+            # Very first turn - should ask about cloud provider
+            turn_guidance = (
+                "\n📊 This is the FIRST question of the conversation.\n"
+                "**CRITICAL**: Ask which cloud platform they want to use (AWS, GCP, Azure, or DigitalOcean).\n"
+                "Do NOT ask about environment yet - that comes AFTER cloud provider.\n"
+            )
+        elif has_cloud_provider and not is_dev and not is_prod:
+            # Cloud provider chosen but environment NOT chosen - MUST ask about environment
+            turn_guidance = (
+                "\n📊 Cloud provider has been selected. This is question 2.\n"
+                "**CRITICAL**: You MUST NOW ask about environment (dev vs prod).\n"
+                "This is MANDATORY and determines the entire question flow:\n"
+                "- DEV: Simple, cost-focused, 4-6 questions total (skip traffic, HA, detailed monitoring)\n"
+                "- PROD: Detailed, reliability-focused, 10-12 questions total (cover ALL topics)\n\n"
+                "Ask: 'Are you deploying to **development** (cost-focused) or **production** (reliability-focused)?'\n"
+                "Provide suggestions: ['Development', 'Production'] or ['DEV', 'PROD']\n"
+                "Do NOT skip this question. Do NOT ask about region yet.\n"
+            )
+        elif is_dev:
+            if user_turns < min_questions:
+                turn_guidance = (
+                    f"\n📊 DEV Environment - Question {user_turns + 1} of 4-6.\n"
+                    "**CRITICAL**: Keep it SIMPLE. Focus on:\n"
+                    "- Region (choose closest/cheapest)\n"
+                    "- Instance type (free tier vs paid)\n"
+                    "- Basic storage (only if README shows database)\n"
+                    "- Basic IAM (CloudWatch logging only)\n"
+                    "**SKIP**: Traffic estimation, HA, load balancers, detailed monitoring, backups.\n"
+                )
+            else:
+                turn_guidance = (
+                    f"\n⚠️ DEV Environment - Question {user_turns + 1}.\n"
+                    "You have asked enough questions for a dev environment.\n"
+                    "Wrap up: Summarize collected parameters and set `is_complete: true`.\n"
+                )
+        elif is_prod:
+            # Check what questions have been answered
+            region = session.collected_parameters.get("region")
+            traffic_info = session.collected_parameters.get("expected_traffic") or session.collected_parameters.get("dau")
             
-            # Update MongoDB
-            if self.sessions_collection is not None:
-                try:
-                    self.sessions_collection.update_one(
-                        {"session_id": session_id},
-                        {
-                            "$addToSet": {"run_ids": run_id},
-                            "$set": {"updated_at": session.updated_at}
-                        }
+            if user_turns < min_questions:
+                if not region:
+                    # First question after environment: Region
+                    turn_guidance = (
+                        f"\n📊 PROD Environment - Question {user_turns + 1} (Region).\n"
+                        f"**CRITICAL**: Ask about region first.\n"
+                        f"Cloud Provider: {cloud_provider.upper()}\n"
+                        f"Use CORRECT terminology: AWS regions (us-east-1, ap-south-1), GCP regions (us-central1, asia-south1), "
+                        f"Azure regions (eastus, centralindia), DigitalOcean regions (nyc1, blr1).\n"
                     )
-                except Exception as e:
-                    logger.error(f"Failed to update session with run_id: {e}")
+                elif not traffic_info:
+                    # Second question after environment: Traffic/User Base
+                    turn_guidance = (
+                        f"\n📊 PROD Environment - Question {user_turns + 1} (Traffic Estimation) - MANDATORY.\n"
+                        "**CRITICAL**: You MUST NOW ask about traffic/user base estimation.\n"
+                        "This is the MOST IMPORTANT production question and determines instance sizing and auto-scaling.\n\n"
+                        "Ask about:\n"
+                        "- Daily Active Users (DAU)\n"
+                        "- OR Requests per second\n"
+                        "- OR Concurrent users\n\n"
+                        "Explain WHY: 'For production sizing, I need to understand your expected load. This determines instance type, count, and whether we need auto-scaling.'\n"
+                        "Reference README: 'I see your README shows [tech stack]...'\n"
+                        "DO NOT skip this question. DO NOT ask about storage/database yet.\n"
+                    )
+                else:
+                    # Remaining production questions
+                    turn_guidance = (
+                        f"\n📊 PROD Environment - Question {user_turns + 1} of 10-12.\n"
+                        f"Cloud Provider: {cloud_provider.upper()} - Use CORRECT terminology.\n"
+                        "**CRITICAL**: You MUST cover ALL production topics:\n"
+                        "- High availability (Multi-AZ, load balancers)\n"
+                        "- Storage specifics (based on detected database from README)\n"
+                        "- Detailed IAM (based on detected services from README)\n"
+                        "- Monitoring & alerting\n"
+                        "- Backup strategy (if database detected)\n"
+                        "- Security (SSH CIDR restrictions)\n\n"
+                        "**Use provider-specific terminology**:\n"
+                        f"- AWS: EC2, RDS, ElastiCache, CloudWatch, IAM Roles\n"
+                        f"- GCP: Compute Engine, Cloud SQL, Memorystore, Cloud Monitoring, Service Accounts\n"
+                        f"- Azure: Virtual Machines, Azure Database, Azure Cache, Azure Monitor, Managed Identities\n"
+                        f"- DigitalOcean: Droplets, Managed Databases, Spaces\n"
+                        "DO NOT skip any of these topics. Set `is_complete: false`.\n"
+                    )
+            elif user_turns >= total_questions_target:
+                turn_guidance = (
+                    f"\n⚠️ PROD Environment - Question {user_turns + 1}.\n"
+                    "This is the LAST question turn. You MUST set `is_complete: true` after this response.\n"
+                    "Summarize all collected parameters and confirm the deployment plan.\n"
+                    "Do NOT ask more questions — wrap up with a friendly deployment summary.\n"
+                )
+            else:
+                turn_guidance = (
+                    f"\n💡 PROD Environment - Question {user_turns + 1}.\n"
+                    "You can wrap up if you have covered ALL critical topics, otherwise ask 1-2 more questions.\n"
+                    "Ensure you've asked about: traffic, HA, storage (based on README DB), IAM (based on README services), monitoring, backups.\n"
+                )
+
+        context = (
+            "\n\n[README Context (authoritative — use this to make intelligent suggestions)]:\n"
+            f"{readme_ctx}\n\n"
+            f"[Parameters collected so far: {snapshot}]\n"
+            f"[Provider: {str(session.provider).upper()}] [Environment: {environment or 'NOT SET'}] [User turns so far: {user_turns}]"
+            f"{turn_guidance}\n\n"
+            "**REMINDER**: Every question MUST reference specific findings from the README context above.\n"
+            "Example: 'I see your README shows MongoDB and Redis...'\n"
+        )
+
+        messages = [{
+            "role": "system",
+            "content": self.SYSTEM_PROMPT + "\n\n" + self.FRIENDLY_BRIDGE_PROMPT + context
+        }]
+
+        for msg in session.messages:
+            if msg["role"] in ("user", "assistant"):
+                messages.append({"role": msg["role"], "content": msg["content"]})
+
+        body = await self.llm_service.chat_completion(
+            messages=messages,
+            temperature=0.15,
+            max_tokens=1200,
+            response_format={"type": "json_object"},
+            timeout=30,
+        )
+
+        # IMPORTANT: body is already JSON (we enforced it in LLMService)
+        logger.debug("LLM JSON body (first 500): %s", str(body)[:500])
+
+        # Validate once and return normalized JSON string
+        data = json.loads(body)
+        return json.dumps(data)
+
+    # ---------------------------
+    # README analysis
+    # ---------------------------
+    async def _analyze_readme(self, readme_content: str) -> Dict[str, Any]:
+        prompt = (
+            "You are **TerraBot** 🤖 — an expert, intelligent, and friendly Cloud Deployment Guide.\n"
+            "You just received a GitHub README. Analyze it deeply and return ONLY valid JSON.\n\n"
+            "### JSON STRUCTURE REQUIRED:\n"
+            "```json\n"
+            "{\n"
+            "  \"extracted_params\": {\n"
+            "    \"workload_type\": \"...\",\n"
+            "    \"language\": \"...\",\n"
+            "    \"database_type\": \"...\",\n"
+            "    ... (all other fields)\n"
+            "  },\n"
+            "  \"message\": \"... (12-15 line detailed greeting) ...\",\n"
+            "  \"suggestions\": [\"AWS\", \"GCP\", \"Azure\", \"DigitalOcean\"]\n"
+            "}\n"
+            "```\n\n"
+            "### EXTRACT THESE FIELDS (in extracted_params):\n"
+            "- **workload_type**: web_server|api|app_server|database|batch|microservice|fullstack|custom\n"
+            "- **workload_description**: 2-3 sentences describing what this project does and what it needs to run\n"
+            "- **language**: primary language/framework (e.g., 'Node.js with Express', 'Python Flask', 'React + Django')\n"
+            "- **ports**: array of {port, protocol, description} — infer from README (e.g., Express default 3000, Flask 5000, React 3000)\n"
+            "- **dependencies**: list of services/tools mentioned (databases, caches, queues, etc.)\n"
+            "- **has_database**: boolean — does the project use any database?\n"
+            "- **database_type**: string — which database (MongoDB, PostgreSQL, MySQL, Redis, etc.) or 'none'\n"
+            "- **has_docker**: boolean — does the README mention Docker/docker-compose?\n"
+            "- **storage_needs**: boolean — does the app need persistent storage (file uploads, user data, logs)?\n"
+            "- **storage_description**: string — brief description of storage needs (e.g., 'User uploaded images', 'Application logs')\n"
+            "- **caching_service**: string — which caching service if any (Redis, Memcached, none)\n"
+            "- **background_jobs**: boolean — does the app use background job processing (Celery, Bull, Sidekiq, queues)?\n"
+            "- **scale_indicators**: string — any mentions of scale expectations ('millions of users', 'high traffic', 'enterprise', etc.) or 'none'\n"
+            "- **suggested_provider**: string — which cloud platform would be BEST for this project and why (aws|gcp|azure|digitalocean)\n"
+            "- **suggested_instance**: string — what instance size would work best for dev deployment\n"
+            "- **project_name**: string — inferred project name\n\n"
+            "### GREETING (the 'message' field) - ABSOLUTELY CRITICAL:\n\n"
+            "**YOU MUST WRITE A DETAILED 12-15 LINE GREETING. THIS IS MANDATORY.**\n\n"
+            "**EXACT STRUCTURE TO FOLLOW:**\n\n"
+            "Line 1: Welcome! I'm excited to help you deploy [project name]!\n\n"
+            "Line 2: I've analyzed your README and here's what I found:\n\n"
+            "Lines 3-10: **DETAILED TECHNOLOGY BREAKDOWN** (one bullet per line):\n"
+            "• **[Language] [version]** with **[Framework] [version]** for [purpose]\n"
+            "• **[Database]** for [purpose] with [ORM/details if any]\n"
+            "• **[Caching service]** for [purpose] (if detected)\n"
+            "• **[Frontend tech]** for [purpose] (if detected)\n"
+            "• **[Background jobs tech]** for [purpose] (if detected)\n"
+            "• **Docker** and **docker-compose** for containerization (if detected)\n"
+            "• Exposing **port [X]** for [service] and **port [Y]** for [service]\n\n"
+            "Lines 11-12: For this stack, you'll need: [list compute, database, storage, load balancer needs]\n\n"
+            "Lines 13-14: I recommend **[Cloud Platform]** because: [specific reasons tied to detected tech]\n\n"
+            "Line 15: **FIRST QUESTION**: Which cloud platform would you like to deploy on: AWS, GCP, Azure, or DigitalOcean?\n\n"
+            "**EXAMPLES OF GOOD GREETINGS:**\n\n"
+            "Example 1 (Node.js + MongoDB):\n"
+            "```\n"
+            "Welcome! I'm excited to help you deploy your Express.js API!\n\n"
+            "I've analyzed your README and here's what I found:\n"
+            "• **Node.js v18** with **Express.js 4.x** for the backend REST API\n"
+            "• **MongoDB 5.0** for document storage with **Mongoose ODM** for data modeling\n"
+            "• **Redis 7.x** for session management and caching layer\n"
+            "• **JWT** for authentication and authorization\n"
+            "• **Docker** and **docker-compose** for containerization\n"
+            "• Exposing **port 3000** for the Express API and **port 27017** for MongoDB\n\n"
+            "For this stack, you'll need compute instances (EC2/Compute Engine) for Node.js, managed MongoDB (Atlas) or self-hosted with persistent storage, and Redis (ElastiCache/self-hosted) for caching. For production, we'll also need a load balancer for high availability.\n\n"
+            "I recommend **AWS** because it offers seamless MongoDB Atlas integration, managed ElastiCache for Redis, excellent Node.js support with Elastic Beanstalk or EC2, and Docker container support with ECS.\n\n"
+            "Which cloud platform would you like to deploy on: AWS, GCP, Azure, or DigitalOcean?\n"
+            "```\n\n"
+            "Example 2 (Python + PostgreSQL):\n"
+            "```\n"
+            "Welcome! I'm excited to help you deploy your Django application!\n\n"
+            "I've analyzed your README and here's what I found:\n"
+            "• **Python 3.11** with **Django 4.2** for the web framework\n"
+            "• **PostgreSQL 15** for relational database with **Django ORM**\n"
+            "• **Celery** with **Redis** for background task processing\n"
+            "• **Gunicorn** as the WSGI server for production\n"
+            "• **Nginx** for reverse proxy and static file serving\n"
+            "• Exposing **port 8000** for Django and **port 5432** for PostgreSQL\n\n"
+            "For this stack, you'll need compute instances for Django/Celery workers, managed PostgreSQL (RDS/Cloud SQL) or self-hosted, Redis for Celery broker, and load balancer for production traffic distribution.\n\n"
+            "I recommend **AWS** because it offers managed RDS PostgreSQL with automated backups, ElastiCache for Redis, excellent Python support, and Application Load Balancer for traffic distribution.\n\n"
+            "Which cloud platform would you like to deploy on: AWS, GCP, Azure, or DigitalOcean?\n"
+            "```\n\n"
+            "**CRITICAL RULES:**\n"
+            "1. Use **bold markdown** for ALL technology names, versions, and key terms\n"
+            "2. Mention SPECIFIC versions when available (Node.js v18, Python 3.11, etc.)\n"
+            "3. List EVERY detected technology as a separate bullet point\n"
+            "4. Explicitly mention ALL exposed ports\n"
+            "5. The greeting MUST be 12-15 lines minimum\n"
+            "6. Make it feel like you deeply understand their project\n\n"
+            "### SUGGESTIONS (must be exactly this):\n"
+            "[\"AWS\", \"GCP\", \"Azure\", \"DigitalOcean\"]\n\n"
+            f"README:\n{readme_content[:15000]}"
+        )
+        raw = await self.llm_service.chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            response_format={"type": "json_object"},
+            timeout=30,
+        )
+        return json.loads(raw)
+
+    def _build_readme_context(self, readme: str, extracted: Dict[str, Any], owner: str, repo: str) -> str:
+        workload = str(extracted.get("workload_description") or "").strip()
+        language = str(extracted.get("language") or "").strip()
+        project_name = str(extracted.get("project_name") or repo or "").strip()
+
+        deps = extracted.get("dependencies") or []
+        if not isinstance(deps, list):
+            deps = [str(deps)]
+        deps_str = ", ".join(str(x) for x in deps if x)[:500]
+
+        ports = extracted.get("ports") or []
+        ports_str = ""
+        if isinstance(ports, list) and ports:
+            parts = []
+            for p in ports[:8]:
+                if isinstance(p, dict):
+                    parts.append(f"{p.get('port')}/{p.get('protocol','tcp')}")
+                else:
+                    parts.append(str(p))
+            ports_str = ", ".join(parts)
+
+        # Enhanced context fields
+        has_database = extracted.get("has_database", False)
+        database_type = str(extracted.get("database_type") or "none").strip()
+        has_docker = extracted.get("has_docker", False)
+        suggested_provider = str(extracted.get("suggested_provider") or "").strip()
+        suggested_instance = str(extracted.get("suggested_instance") or "").strip()
+        
+        # New deployment-specific fields
+        storage_needs = extracted.get("storage_needs", False)
+        storage_description = str(extracted.get("storage_description") or "").strip()
+        caching_service = str(extracted.get("caching_service") or "none").strip()
+        background_jobs = extracted.get("background_jobs", False)
+        scale_indicators = str(extracted.get("scale_indicators") or "none").strip()
+
+        excerpt_lines = [ln.strip() for ln in readme.strip().splitlines() if ln.strip()][:40]
+        excerpt = "\n".join(excerpt_lines)[:2000]
+
+        return (
+            f"Project: {project_name} ({owner}/{repo})\n"
+            f"Workload: {workload or 'Not inferred'}\n"
+            f"Language/Framework: {language or 'Not specified'}\n"
+            f"Dependencies: {deps_str or 'Not listed'}\n"
+            f"Ports: {ports_str or 'Not listed'}\n"
+            f"Database: {'Yes — ' + database_type if has_database else 'No database detected'}\n"
+            f"Docker: {'Yes — Docker/docker-compose detected' if has_docker else 'No Docker detected'}\n"
+            f"Storage Needs: {'Yes — ' + storage_description if storage_needs else 'No persistent storage detected'}\n"
+            f"Caching: {caching_service if caching_service != 'none' else 'No caching service detected'}\n"
+            f"Background Jobs: {'Yes — background job processing detected' if background_jobs else 'No background jobs detected'}\n"
+            f"Scale Indicators: {scale_indicators}\n"
+            f"Suggested Cloud: {suggested_provider or 'Not determined'}\n"
+            f"Suggested Instance: {suggested_instance or 'Not determined'}\n"
+            f"README Excerpt:\n{excerpt}"
+        )
+
+    # ---------------------------
+    # Helpers
+    # ---------------------------
+    @staticmethod
+    def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> None:
+        for k, v in overlay.items():
+            if k in base and isinstance(base[k], dict) and isinstance(v, dict):
+                ConversationManager._deep_merge(base[k], v)
+            else:
+                base[k] = v
+
+    @staticmethod
+    def _apply_defaults(params: Dict[str, Any], provider: str = "aws") -> None:
+        provider = (provider or "aws").lower()
+
+        is_prod = params.get("environment") in ("prod", "production")
+        instance_count = int(params.get("instance_count", 1) or 1)
+        multi = instance_count > 1
+
+        base_defaults: Dict[str, Any] = {
+            "vpc_cidr": "10.0.0.0/16",
+            "subnet_type": "public",
+            "subnet_count": 2,
+            "enable_public_ip": True,
+            "storage_size_gb": 20,
+            "monitoring_enabled": True,
+            "detailed_monitoring": bool(is_prod),
+            "auto_scaling_enabled": False,
+            "backup_enabled": False,
+            "enable_imdsv2": True,
+            "ssh_username": params.get("ssh_username") or "ubuntu",
+        }
+
+        if provider == "aws":
+            base_defaults.update({
+                "storage_type": "gp3",
+                "load_balancer_type": ("application" if is_prod and multi else "none"),
+                "enable_https": bool(is_prod and multi),
+            })
+        elif provider == "gcp":
+            base_defaults.update({
+                "storage_type": "pd-balanced",
+                "enable_https": bool(is_prod and multi),
+            })
+            params.setdefault("gcp_region", params.get("region", "us-central1"))
+        elif provider == "azure":
+            base_defaults.update({
+                "storage_type": "StandardSSD_LRS",
+                "enable_https": bool(is_prod and multi),
+            })
+            params.setdefault("azure_location", params.get("region", "eastus"))
+        elif provider == "digitalocean":
+            base_defaults.update({
+                "enable_https": bool(is_prod and multi),
+                "load_balancer_type": ("application" if is_prod and multi else "none"),
+            })
+            params.setdefault("do_region", params.get("region", "nyc1"))
+
+        for key, val in base_defaults.items():
+            params.setdefault(key, val)
+
+        if provider == "aws":
+            iam = params.setdefault("iam_services", {})
+            iam.setdefault(
+                "cloudwatch",
+                [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents",
+                    "cloudwatch:PutMetricData",
+                ],
+            )
+            iam.setdefault("ssm", ["ssm:UpdateInstanceInformation", "ssm:GetParameter", "ssm:GetParameters"])
+
+    def _calculate_cost(self, params: dict, provider: str = "aws") -> str:
+        provider = (provider or "aws").lower()
+
+        instance_count = int(params.get("instance_count", 1) or 1)
+        instance_type = str(params.get("instance_type", "") or "")
+        storage_size = float(params.get("storage_size_gb", 20) or 20)
+        storage_type = str(params.get("storage_type", "") or "")
+        lb_type = str(params.get("load_balancer_type", "none") or "none")
+
+        if provider == "aws":
+            monthly_instance = {"t3.micro": 7.59, "t3.small": 15.18, "t3.medium": 30.37}.get(instance_type, 15.18)
+            storage_price = {"gp3": 0.08, "io2": 0.125}.get(storage_type, 0.08)
+            lb_cost = 16.20 if lb_type == "application" else 0.0
+            compute_cost = instance_count * monthly_instance
+            storage_cost = storage_size * storage_price
+            total = compute_cost + storage_cost + lb_cost
+            return (
+                f"1) Summary: {instance_count}x {instance_type or 't3.small'}, {int(storage_size)}GB {storage_type or 'gp3'}, LB: {lb_type}\n"
+                f"2) Cost Breakdown: Compute ${compute_cost:.2f} + Storage ${storage_cost:.2f} + LB ${lb_cost:.2f}\n"
+                f"3) Total Estimate: ~${total:.2f}/month (excludes data transfer)"
+            )
+
+        if provider == "gcp":
+            monthly_instance = {"e2-micro": 7.00, "e2-small": 15.00}.get(instance_type, 12.00)
+            storage_price = {"pd-balanced": 0.10, "pd-ssd": 0.17}.get(storage_type, 0.10)
+            compute_cost = instance_count * monthly_instance
+            storage_cost = storage_size * storage_price
+            total = compute_cost + storage_cost
+            return (
+                f"1) Summary: {instance_count}x {instance_type or 'e2-small'}, {int(storage_size)}GB {storage_type or 'pd-balanced'}\n"
+                f"2) Cost Breakdown: Compute ${compute_cost:.2f} + Storage ${storage_cost:.2f}\n"
+                f"3) Total Estimate: ~${total:.2f}/month (excludes network egress)"
+            )
+
+        if provider == "azure":
+            monthly_instance = {"B1s": 10.00, "B2s": 40.00}.get(instance_type, 25.00)
+            storage_price = {"StandardSSD_LRS": 0.08, "Premium_LRS": 0.12}.get(storage_type, 0.08)
+            compute_cost = instance_count * monthly_instance
+            storage_cost = storage_size * storage_price
+            total = compute_cost + storage_cost
+            return (
+                f"1) Summary: {instance_count}x {instance_type or 'B1s'}, {int(storage_size)}GB {storage_type or 'StandardSSD_LRS'}\n"
+                f"2) Cost Breakdown: Compute ${compute_cost:.2f} + Storage ${storage_cost:.2f}\n"
+                f"3) Total Estimate: ~${total:.2f}/month (excludes bandwidth)"
+            )
+
+        monthly_instance = {"basic-1vcpu-1gb": 6.00, "basic-1vcpu-2gb": 12.00}.get(instance_type, 12.00)
+        compute_cost = instance_count * monthly_instance
+        total = compute_cost
+        return (
+            f"1) Summary: {instance_count}x {instance_type or 'basic-1vcpu-2gb'} droplet\n"
+            f"2) Cost Breakdown: Compute ${compute_cost:.2f}\n"
+            f"3) Total Estimate: ~${total:.2f}/month (excludes bandwidth)"
+        )
+
+    @staticmethod
+    def _normalize_bot_message(message: Any, is_complete: bool) -> str:
+        text = str(message or "").strip()
+        
+        # If empty, provide a safe fallback
+        if not text:
+            if is_complete:
+                return "🚀 All set! I'll generate your Terraform configuration now."
+            return "What would you prefer for your deployment? 🤔"
+
+        return text

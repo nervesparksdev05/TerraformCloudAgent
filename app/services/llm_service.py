@@ -1,8 +1,8 @@
-
 import os
 import json
 import asyncio
-from typing import List, Dict, Any, Optional, Union
+import re
+from typing import List, Dict, Optional
 import google.generativeai as genai
 from openai import OpenAI, AsyncOpenAI
 from app.core import config
@@ -10,17 +10,50 @@ from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
+
+def extract_json_object(text: str) -> str:
+    """
+    Best-effort extraction of a single JSON object from LLM output.
+    Handles:
+    - ```json ... ```
+    - extra text before/after JSON
+    """
+    if not text:
+        raise ValueError("Empty LLM response")
+
+    t = text.strip()
+
+    # Strip markdown fences
+    t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE).strip()
+    t = re.sub(r"\s*```$", "", t).strip()
+
+    # If already valid JSON
+    try:
+        json.loads(t)
+        return t
+    except Exception:
+        pass
+
+    # Extract first {...} block
+    m = re.search(r"\{.*\}", t, flags=re.DOTALL)
+    if not m:
+        raise ValueError(f"No JSON object found in output: {t[:300]}")
+
+    candidate = m.group(0)
+    json.loads(candidate)  # validate
+    return candidate
+
+
 class LLMService:
     """
     Unified LLM service supporting Google Gemini and OpenAI.
     Handles authentication, fallback logic, and provider switching.
     """
-    
+
     def __init__(self):
-        self.provider = config.DEFAULT_PROVIDER  # This is cloud provider, NOT LLM provider.
-        # Check env/config for LLM provider preference
-        self.llm_provider = os.getenv("LLM_PROVIDER", "gemini").lower()
-        
+        self.provider = config.DEFAULT_PROVIDER  # cloud provider, NOT LLM provider
+        self.llm_provider = os.getenv("LLM_PROVIDER", "gemini").lower().strip()
+
         # Initialize Gemini
         self.gemini_api_key = config.GOOGLE_API_KEY
         if self.gemini_api_key:
@@ -29,7 +62,7 @@ class LLMService:
         else:
             logger.warning("GOOGLE_API_KEY not set. Gemini will not be available.")
             self.gemini_model = None
-            
+
         # Initialize OpenAI
         self.openai_api_key = config.OPENAI_API_KEY
         if self.openai_api_key:
@@ -49,26 +82,28 @@ class LLMService:
         """
         Synchronous chat completion.
         """
+        current_provider = self.llm_provider
+
         try:
-            current_provider = self.llm_provider
-            
             if current_provider == "openai" and self.openai_client:
                 return self._call_openai(messages, temperature, max_tokens, response_format, timeout)
-            elif current_provider == "gemini" and self.gemini_model:
+
+            if current_provider == "gemini" and self.gemini_model:
                 return self._call_gemini(messages, temperature, max_tokens, response_format)
-            else:
-                # Fallback or error
-                if self.gemini_model:
-                     logger.info("Falling back to Gemini...")
-                     return self._call_gemini(messages, temperature, max_tokens, response_format)
-                elif self.openai_client:
-                     logger.info("Falling back to OpenAI...")
-                     return self._call_openai(messages, temperature, max_tokens, response_format, timeout)
-                else:
-                    raise ValueError("No LLM provider configured or available.")
-                    
+
+            # Fallback
+            if self.gemini_model:
+                logger.info("Falling back to Gemini...")
+                return self._call_gemini(messages, temperature, max_tokens, response_format)
+
+            if self.openai_client:
+                logger.info("Falling back to OpenAI...")
+                return self._call_openai(messages, temperature, max_tokens, response_format, timeout)
+
+            raise ValueError("No LLM provider configured or available.")
+
         except Exception as e:
-            logger.error(f"LLM generation failed: {e}")
+            logger.error(f"LLM generation failed: {e}", exc_info=True)
             raise
 
     def _call_openai(self, messages, temperature, max_tokens, response_format, timeout) -> str:
@@ -83,7 +118,13 @@ class LLMService:
             kwargs["response_format"] = response_format
 
         response = self.openai_client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content
+        content = response.choices[0].message.content or ""
+        logger.debug("OpenAI raw response (first 500): %s", content[:500])
+
+        if response_format and response_format.get("type") == "json_object":
+            return extract_json_object(content)
+
+        return content
 
     # Models that do NOT support JSON response mode
     _NO_JSON_MODE_PREFIXES = ("gemma-",)
@@ -94,57 +135,71 @@ class LLMService:
         return not any(model_name.startswith(p) for p in self._NO_JSON_MODE_PREFIXES)
 
     def _call_gemini(self, messages, temperature, max_tokens, response_format) -> str:
-        # Convert OpenAI-style messages to Gemini history
-        gemini_hist = []
+        json_requested = bool(response_format and response_format.get("type") == "json_object")
+
+        # Build Gemini history safely: keep a clean history and a final user prompt
+        history = []
         system_instruction = None
-        json_requested = response_format and response_format.get("type") == "json_object"
-        
+        last_user = None
+
         for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
+            role = msg.get("role")
+            content = (msg.get("content") or "").strip()
+
             if role == "system":
                 system_instruction = content
             elif role == "user":
-                gemini_hist.append({"role": "user", "parts": [content]})
+                # keep user turns in history; we will send the LAST user as prompt
+                history.append({"role": "user", "parts": [content]})
             elif role == "assistant":
-                gemini_hist.append({"role": "model", "parts": [content]})
-        
+                history.append({"role": "model", "parts": [content]})
+
+        # Pull last user out of history as send_message prompt
+        if history and history[-1]["role"] == "user":
+            last_user = history[-1]["parts"][0]
+            history = history[:-1]
+        else:
+            last_user = "Hello"
+
         # Configure generation config
         generation_config = genai.types.GenerationConfig(
             temperature=temperature,
             max_output_tokens=max_tokens,
         )
-        
-        # Only set JSON mime type for models that support it
-        if json_requested and self._model_supports_json_mode():
-            generation_config.response_mime_type = "application/json"
-        elif json_requested:
-            # Fallback: instruct the model via prompt to return JSON
-            logger.info(f"Model {config.GEMINI_MODEL} does not support JSON mode; using prompt-based JSON.")
-            json_hint = "\n\nIMPORTANT: Respond ONLY with valid JSON. No markdown, no explanation, just the JSON object."
+
+        # Strong JSON instruction (works even if JSON mime type is ignored)
+        if json_requested:
+            json_hint = (
+                "\n\nIMPORTANT: Respond ONLY with a single valid JSON object. "
+                "No markdown, no code fences, no extra text."
+            )
             if system_instruction:
                 system_instruction += json_hint
-            elif gemini_hist:
-                # Append hint to the last user message
-                last = gemini_hist[-1]
-                last["parts"] = [last["parts"][0] + json_hint]
+            else:
+                last_user = (last_user or "Hello") + json_hint
+
+        # Only set JSON mime type for supported models
+        if json_requested and self._model_supports_json_mode():
+            generation_config.response_mime_type = "application/json"
 
         # Create model with system instruction if present
         model = self.gemini_model
         if system_instruction:
-             model = genai.GenerativeModel(
-                 model_name=config.GEMINI_MODEL,
-                 system_instruction=system_instruction
-             )
+            model = genai.GenerativeModel(
+                model_name=config.GEMINI_MODEL,
+                system_instruction=system_instruction
+            )
 
-        chat = model.start_chat(history=gemini_hist[:-1] if gemini_hist else [])
-        last_msg = gemini_hist[-1]["parts"][0] if gemini_hist else "Hello"
-        
-        response = chat.send_message(
-            last_msg,
-            generation_config=generation_config
-        )
-        return response.text
+        chat = model.start_chat(history=history)
+        response = chat.send_message(last_user, generation_config=generation_config)
+        text = response.text or ""
+
+        logger.debug("Gemini raw response (first 500): %s", text[:500])
+
+        if json_requested:
+            return extract_json_object(text)
+
+        return text
 
 
 class AsyncLLMService(LLMService):
@@ -153,7 +208,6 @@ class AsyncLLMService(LLMService):
     """
     def __init__(self):
         super().__init__()
-        # Initialize Async OpenAI Client
         if self.openai_api_key:
             self.async_openai_client = AsyncOpenAI(api_key=self.openai_api_key)
         else:
@@ -167,33 +221,28 @@ class AsyncLLMService(LLMService):
         response_format: Optional[Dict[str, str]] = None,
         timeout: int = 30
     ) -> str:
-        """
-        Asynchronous chat completion.
-        """
         try:
             if self.llm_provider == "openai" and self.async_openai_client:
                 return await self._call_openai_async(messages, temperature, max_tokens, response_format, timeout)
-            elif self.llm_provider == "gemini" and self.gemini_model:
-                # Gemini SDK async support is ... partial/different. 
-                # Simplest is to run sync method in a thread executor for now 
-                # unless using the distinct async methods which might need newer SDK.
-                # Let's check if we can run in thread.
+
+            if self.llm_provider == "gemini" and self.gemini_model:
                 return await asyncio.to_thread(
                     self._call_gemini, messages, temperature, max_tokens, response_format
                 )
-            else:
-                 # Fallback logic
-                if self.gemini_model:
-                     return await asyncio.to_thread(
-                        self._call_gemini, messages, temperature, max_tokens, response_format
-                    )
-                elif self.async_openai_client:
-                     return await self._call_openai_async(messages, temperature, max_tokens, response_format, timeout)
-                else:
-                    raise ValueError("No LLM provider configured or available.")
+
+            # fallback
+            if self.gemini_model:
+                return await asyncio.to_thread(
+                    self._call_gemini, messages, temperature, max_tokens, response_format
+                )
+
+            if self.async_openai_client:
+                return await self._call_openai_async(messages, temperature, max_tokens, response_format, timeout)
+
+            raise ValueError("No LLM provider configured or available.")
 
         except Exception as e:
-            logger.error(f"Async LLM generation failed: {e}")
+            logger.error(f"Async LLM generation failed: {e}", exc_info=True)
             raise
 
     async def _call_openai_async(self, messages, temperature, max_tokens, response_format, timeout) -> str:
@@ -208,4 +257,10 @@ class AsyncLLMService(LLMService):
             kwargs["response_format"] = response_format
 
         response = await self.async_openai_client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content
+        content = response.choices[0].message.content or ""
+        logger.debug("OpenAI async raw response (first 500): %s", content[:500])
+
+        if response_format and response_format.get("type") == "json_object":
+            return extract_json_object(content)
+
+        return content

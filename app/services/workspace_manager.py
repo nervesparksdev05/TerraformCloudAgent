@@ -58,6 +58,13 @@ class WorkspaceManager:
             file_path = workspace_path / filename
             file_path.write_text(content, encoding="utf-8")
             logger.debug(f"Wrote {filename} ({len(content)} bytes)")
+
+        # Handle CI/CD workflow
+        if bundle.github_workflow_yaml:
+            workflow_path = workspace_path / ".github" / "workflows"
+            workflow_path.mkdir(parents=True, exist_ok=True)
+            (workflow_path / "deploy.yml").write_text(bundle.github_workflow_yaml, encoding="utf-8")
+            logger.debug(f"Wrote .github/workflows/deploy.yml ({len(bundle.github_workflow_yaml)} bytes)")
     
     def read_terraform_files(self, workspace_path: Path) -> dict:
         """
