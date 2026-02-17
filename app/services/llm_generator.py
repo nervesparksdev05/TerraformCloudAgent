@@ -372,7 +372,41 @@ Return ONLY the raw YAML content. No markdown fences.
             "digitalocean": self.DO_TEMPLATE,
         }.get(provider_norm, self.AWS_TEMPLATE)
 
-        return self.BASE_SYSTEM_PROMPT + "\n\n" + provider_block + "\n\n" + self.README_BRIDGE_PROMPT
+        # Add service-specific templates based on detected services
+        service_templates_block = self._build_service_templates_block(params, provider_norm)
+
+        return (
+            self.BASE_SYSTEM_PROMPT + "\n\n" + 
+            provider_block + "\n\n" + 
+            service_templates_block + "\n\n" + 
+            self.README_BRIDGE_PROMPT
+        )
+
+    def _build_service_templates_block(self, params: Dict[str, Any], provider: str) -> str:
+        """Build service-specific template guidance based on detected services."""
+        from app.services.service_templates import get_all_service_templates
+        
+        detected_services = params.get("detected_services", {})
+        provider_services = detected_services.get(provider, [])
+        
+        if not provider_services:
+            return ""
+        
+        # Get combined templates for all detected services
+        templates = get_all_service_templates(provider, provider_services)
+        
+        if not templates:
+            return ""
+        
+        return (
+            "### 🎯 DETECTED SERVICES - ADDITIONAL REQUIREMENTS ###\n\n"
+            f"Based on README analysis, the following services were detected: {', '.join(provider_services)}\n\n"
+            "You MUST include Terraform resources for these services in addition to compute instances:\n\n"
+            f"{templates}\n\n"
+            "CRITICAL: Integrate these services with the main compute infrastructure. "
+            "For example, if RDS is detected, configure security groups to allow EC2 -> RDS traffic. "
+            "If S3 is detected, add IAM permissions for EC2 to access S3.\n"
+        )
 
     def _provider_defaults(self, provider_norm: str) -> Dict[str, Any]:
         provider_norm = (provider_norm or "aws").lower()

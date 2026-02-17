@@ -17,12 +17,325 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# (CSS unchanged) — keep your full CSS block as-is
+# Enhanced CSS for better font organization and readability
 st.markdown(
     """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-/* ... keep your full CSS exactly the same ... */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+/* Global font settings */
+* {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* Main app container */
+.main {
+    font-size: 16px;
+    line-height: 1.6;
+    color: #1f2937;
+}
+
+/* Headers - Clear hierarchy */
+h1 {
+    font-size: 2.5rem !important;
+    font-weight: 700 !important;
+    line-height: 1.2 !important;
+    margin-bottom: 1.5rem !important;
+    color: #111827 !important;
+    letter-spacing: -0.02em !important;
+}
+
+h2 {
+    font-size: 2rem !important;
+    font-weight: 600 !important;
+    line-height: 1.3 !important;
+    margin-bottom: 1.25rem !important;
+    color: #1f2937 !important;
+    letter-spacing: -0.01em !important;
+}
+
+h3 {
+    font-size: 1.5rem !important;
+    font-weight: 600 !important;
+    line-height: 1.4 !important;
+    margin-bottom: 1rem !important;
+    color: #374151 !important;
+}
+
+h4 {
+    font-size: 1.25rem !important;
+    font-weight: 500 !important;
+    line-height: 1.5 !important;
+    margin-bottom: 0.75rem !important;
+    color: #4b5563 !important;
+}
+
+/* Paragraph text */
+p {
+    font-size: 1rem !important;
+    line-height: 1.7 !important;
+    margin-bottom: 1rem !important;
+    color: #374151 !important;
+}
+
+/* Sidebar */
+[data-testid="stSidebar"] {
+    font-size: 0.95rem;
+}
+
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+    font-size: 1.1rem !important;
+    font-weight: 600 !important;
+    color: #111827 !important;
+}
+
+/* Buttons */
+.stButton button {
+    font-size: 1rem !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.01em !important;
+    padding: 0.625rem 1.25rem !important;
+}
+
+/* Input fields */
+.stTextInput input,
+.stTextArea textarea,
+.stSelectbox select {
+    font-size: 1rem !important;
+    font-weight: 400 !important;
+    line-height: 1.5 !important;
+}
+
+/* Labels */
+.stTextInput label,
+.stTextArea label,
+.stSelectbox label {
+    font-size: 0.875rem !important;
+    font-weight: 500 !important;
+    color: #374151 !important;
+    margin-bottom: 0.5rem !important;
+}
+
+/* Chat messages */
+.stChatMessage {
+    font-size: 1rem !important;
+    line-height: 1.6 !important;
+}
+
+/* Bot messages */
+[data-testid="stChatMessageContent"] {
+    font-size: 1rem !important;
+    line-height: 1.7 !important;
+    color: #1f2937 !important;
+}
+
+/* Code blocks */
+code {
+    font-family: 'Monaco', 'Menlo', 'Consolas', monospace !important;
+    font-size: 0.9rem !important;
+    background-color: #f3f4f6 !important;
+    padding: 0.2rem 0.4rem !important;
+    border-radius: 0.25rem !important;
+}
+
+pre code {
+    font-size: 0.875rem !important;
+    line-height: 1.5 !important;
+}
+
+/* Success/Error/Warning messages */
+.stSuccess, .stError, .stWarning, .stInfo {
+    font-size: 0.95rem !important;
+    font-weight: 500 !important;
+    line-height: 1.5 !important;
+}
+
+/* Markdown content */
+.stMarkdown {
+    font-size: 1rem !important;
+    line-height: 1.7 !important;
+}
+
+/* Lists */
+ul, ol {
+    font-size: 1rem !important;
+    line-height: 1.7 !important;
+    margin-left: 1.5rem !important;
+}
+
+li {
+    margin-bottom: 0.5rem !important;
+}
+
+/* Links */
+a {
+    font-weight: 500 !important;
+    color: #2563eb !important;
+    text-decoration: none !important;
+}
+
+a:hover {
+    text-decoration: underline !important;
+}
+
+/* Expander */
+.streamlit-expanderHeader {
+    font-size: 1rem !important;
+    font-weight: 600 !important;
+}
+
+/* Metrics */
+[data-testid="stMetricValue"] {
+    font-size: 2rem !important;
+    font-weight: 600 !important;
+}
+
+[data-testid="stMetricLabel"] {
+    font-size: 0.875rem !important;
+    font-weight: 500 !important;
+    color: #6b7280 !important;
+}
+
+/* Tables */
+table {
+    font-size: 0.95rem !important;
+}
+
+th {
+    font-weight: 600 !important;
+    color: #111827 !important;
+}
+
+td {
+    color: #374151 !important;
+}
+
+/* Spinner text */
+.stSpinner > div {
+    font-size: 1rem !important;
+    font-weight: 500 !important;
+}
+
+/* ===== SIDEBAR IMPROVEMENTS ===== */
+
+/* Sidebar width and padding */
+[data-testid="stSidebar"] {
+    min-width: 280px !important;
+    max-width: 320px !important;
+}
+
+[data-testid="stSidebar"] > div:first-child {
+    padding: 1.5rem 1rem !important;
+}
+
+/* Sidebar title card */
+.tca-card {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    padding: 1.25rem;
+    border-radius: 0.75rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.tca-title {
+    font-size: 1.25rem !important;
+    font-weight: 700 !important;
+    color: white !important;
+    margin-bottom: 0.25rem !important;
+    line-height: 1.3 !important;
+}
+
+.tca-sub {
+    font-size: 0.875rem !important;
+    color: rgba(255, 255, 255, 0.9) !important;
+    line-height: 1.4 !important;
+}
+
+/* Recent Chats section */
+[data-testid="stSidebar"] h3 {
+    font-size: 1rem !important;
+    font-weight: 600 !important;
+    color: #111827 !important;
+    margin-bottom: 0.75rem !important;
+}
+
+/* Session buttons - Better text wrapping */
+[data-testid="stSidebar"] .stButton button {
+    font-size: 0.875rem !important;
+    font-weight: 500 !important;
+    padding: 0.625rem 0.75rem !important;
+    text-align: left !important;
+    white-space: normal !important;
+    word-wrap: break-word !important;
+    overflow-wrap: break-word !important;
+    line-height: 1.4 !important;
+    min-height: 2.5rem !important;
+    height: auto !important;
+}
+
+/* Delete button (×) */
+[data-testid="stSidebar"] button[kind="secondary"] {
+    padding: 0.5rem !important;
+    min-width: 2rem !important;
+    font-size: 1.25rem !important;
+}
+
+/* Session status indicators */
+[data-testid="stSidebar"] .stSuccess,
+[data-testid="stSidebar"] .stInfo,
+[data-testid="stSidebar"] .stWarning {
+    font-size: 0.8rem !important;
+    padding: 0.5rem !important;
+    margin: 0.5rem 0 !important;
+}
+
+/* Captions in sidebar */
+[data-testid="stSidebar"] .stCaption {
+    font-size: 0.75rem !important;
+    color: #6b7280 !important;
+    margin: 0.5rem 0 !important;
+    word-wrap: break-word !important;
+}
+
+/* Expander in sidebar */
+[data-testid="stSidebar"] .streamlit-expanderHeader {
+    font-size: 0.875rem !important;
+    font-weight: 600 !important;
+    padding: 0.5rem !important;
+}
+
+/* Dividers in sidebar */
+[data-testid="stSidebar"] hr {
+    margin: 1rem 0 !important;
+    border-color: #e5e7eb !important;
+}
+
+/* New Chat button */
+[data-testid="stSidebar"] button[kind="primary"] {
+    font-weight: 600 !important;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+    border: none !important;
+}
+
+/* Scrollbar for sidebar */
+[data-testid="stSidebar"] ::-webkit-scrollbar {
+    width: 6px;
+}
+
+[data-testid="stSidebar"] ::-webkit-scrollbar-track {
+    background: #f3f4f6;
+}
+
+[data-testid="stSidebar"] ::-webkit-scrollbar-thumb {
+    background: #d1d5db;
+    border-radius: 3px;
+}
+
+[data-testid="stSidebar"] ::-webkit-scrollbar-thumb:hover {
+    background: #9ca3af;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -178,10 +491,15 @@ def _render_status(status: str) -> None:
 
 def render_sidebar() -> None:
     with st.sidebar:
-        st.markdown('<div class="tca-card">', unsafe_allow_html=True)
-        st.markdown('<div class="tca-title">Terraform Cloud Agent</div>', unsafe_allow_html=True)
-        st.markdown('<div class="tca-sub">README-driven cloud deployment</div>', unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown(
+            """
+            <div class="tca-card">
+                <div class="tca-title">Terraform Cloud Agent</div>
+                <div class="tca-sub">README-driven cloud deployment</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
         st.write("")
 
         if st.button("New Chat", use_container_width=True, type="primary"):

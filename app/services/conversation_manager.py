@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import sys
 from datetime import datetime
 from typing import Any, Dict, Optional, List
 
@@ -38,8 +39,9 @@ You are a senior cloud architect who explains *why* before asking *what*.
 Your goal is to gather deployment info through a DEEP, LOGICAL, README-DRIVEN conversation.
 
 ### 🧠 INTELLIGENCE RULES (CRITICAL):
-1. **Explain First (4-5 lines)**: NEVER ask a one-line question. ALWAYS explain the concept deeply first.
+1. **Explain First (DETAILED - 8-10 lines)**: NEVER ask a one-line question. ALWAYS explain the concept deeply first.
    - Reference specific findings from the README in your explanations
+   - **CONTEXT LINKING**: You MUST reference the user's previous answer in your explanation (e.g., "Since you chose AWS for development...")
    - Example: "I see from your README that you're using MongoDB and Redis..."
 2. **README-Driven Questions**: ALWAYS reference the README context when asking questions.
    - Mention detected technologies, ports, databases, or services
@@ -89,7 +91,41 @@ DEV Question Flow (after cloud provider and environment):
 5. **Wrap Up**: Confirm all details and set is_complete to true
 
 #### PATH B: ENVIRONMENT = "PRODUCTION" (Detailed, 10-12 Questions)
-For production, dig deep into every aspect. You MUST cover ALL these topics:
+For production, dig deep. You MUST Ensure coverage of the **TOP 15 SERVICES** if relevant to the architecture.
+
+**TOP 15 AWS SERVICES TO COVER**:
+1.  **EC2** (Compute)
+2.  **S3** (Storage)
+3.  **RDS** (Database)
+4.  **Lambda** (Serverless)
+5.  **VPC** (Networking)
+6.  **IAM** (Security)
+7.  **CloudWatch** (Monitoring)
+8.  **ELB/ALB** (Load Balancing)
+9.  **Route53** (DNS)
+10. **EBS** (Block Storage)
+11. **CloudFront** (CDN)
+12. **EKS/ECS** (Containers)
+13. **SNS/SQS** (Messaging)
+14. **DynamoDB** (NoSQL)
+15. **ElastiCache** (Caching)
+
+**TOP 15 GCP SERVICES TO COVER**:
+1.  **Compute Engine** (Compute)
+2.  **Cloud Storage** (Storage)
+3.  **Cloud SQL** (Database)
+4.  **Cloud Functions** (Serverless)
+5.  **VPC** (Networking)
+6.  **IAM** (Security)
+7.  **Cloud Operations/Monitoring** (Monitoring)
+8.  **Cloud Load Balancing** (Load Balancing)
+9.  **Cloud DNS** (DNS)
+10. **Persistent Disk** (Block Storage)
+11. **Cloud CDN** (CDN)
+12. **GKE** (Containers)
+13. **Pub/Sub** (Messaging)
+14. **Firestore** (NoSQL)
+15. **Memorystore** (Caching)
 
 PROD Question Flow (after cloud provider and environment):
 1.  **Region**: "Which region?" (Explain latency, compliance, cost)
@@ -169,11 +205,13 @@ PROD Question Flow (after cloud provider and environment):
 ### RESPONSE FORMAT:
 Return ONLY valid JSON:
 {
-  "message": "Your 4-5 line README-aware explanation + question...",
+  "message": "Your DETAILED 5-6 LINE explanation + question (MANDATORY)...",
   "extracted_params": { "key": "value" },
   "is_complete": false,
   "suggestions": ["Option A", "Option B"]
 }
+
+**CRITICAL**: The "message" field MUST be 5-6 lines minimum. Short 1-2 line questions are UNACCEPTABLE and will be rejected.
 """
 
     FRIENDLY_BRIDGE_PROMPT = """
@@ -191,7 +229,27 @@ Return ONLY valid JSON:
    - GCP: Compute Engine, Cloud SQL, Memorystore, Cloud Storage, Cloud Monitoring, Service Accounts
    - Azure: Virtual Machines, Azure Database, Azure Cache, Blob Storage, Azure Monitor, Managed Identities
    - DigitalOcean: Droplets, Managed Databases, Spaces, Block Storage
-4. **Deep Explanations**: Every question needs 4-5 lines explaining WHY we're asking and WHAT the options mean.
+4. **DETAILED QUESTIONS (5-6 LINES MANDATORY)**: Every question MUST follow this structure:
+   - **Line 1-2 (Context)**: Explain why we're asking this question and how it relates to their README
+   - **Line 3-4 (Impact)**: Explain what this choice affects (cost, performance, reliability, security)
+   - **Line 5 (Options)**: Present 2-3 clear options with brief explanations
+   - **Line 6 (Recommendation)**: Suggest the best option based on README analysis and environment
+   - **Line 7 (Prompt)**: Clear question asking for user input
+   
+   **EXAMPLE OF GOOD QUESTION FORMAT**:
+   "For production deployments, I need to understand your expected traffic to properly size your infrastructure. This is critical for ensuring your application can handle the load without performance degradation or downtime.
+   
+   Based on your Node.js + PostgreSQL stack, traffic estimation determines: instance count and type (more traffic = more/larger instances), database sizing (queries per second capacity), auto-scaling configuration (when to add more servers), and load balancer settings (connection limits, health checks).
+   
+   Please provide one of the following: Daily Active Users (DAU) like '5,000 DAU', Requests per second like '100 req/sec', or Monthly traffic like '10 million requests/month'.
+   
+   If you're unsure, you can estimate: Small app (1k-10k DAU), Medium (10k-100k DAU), Large (100k+ DAU).
+   
+   What's your expected traffic or user base?"
+   
+   **BAD QUESTION (TOO SHORT - DO NOT DO THIS)**:
+   "What's your expected traffic?"
+   
 5. **Suggestions**: Provide 2-3 specific, actionable options using the CORRECT cloud provider terminology.
 6. **No Skipping**: For PROD, you MUST ask about: region, traffic, HA, instance config, storage, IAM, monitoring, backups, security.
 """
@@ -250,6 +308,42 @@ Return ONLY valid JSON:
     # ---------------------------
     # Session create
     # ---------------------------
+    async def _terminal_print(self, role: str, message: str):
+        """Helper to force print to terminal via multiple channels for visibility.
+        CRITICAL: This function must NEVER raise an exception, as it's called during session creation.
+        """
+        try:
+            # Use plain text tags instead of emojis for Windows compatibility
+            tag = "USER" if role.upper() == "USER" else "BOT"
+            output = f"\n[{tag}]: {message}\n"
+            
+            # Method 1: Try stdout
+            try:
+                sys.stdout.write(output)
+                sys.stdout.flush()
+            except Exception:
+                # Silently fail - terminal logging is not critical
+                pass
+            
+            # Method 2: Try stderr
+            try:
+                sys.stderr.write(output)
+                sys.stderr.flush()
+            except Exception:
+                # Silently fail - terminal logging is not critical
+                pass
+            
+            # Method 3: Logger (most reliable)
+            try:
+                logger.info(f"[{tag}]: {message[:200]}...")  # Truncate for logger
+            except Exception:
+                # Even logger can fail in extreme cases
+                pass
+                
+        except Exception:
+            # Catch-all: NEVER let this function crash the calling code
+            pass
+
     async def create_session(
         self,
         owner: str = "",
@@ -274,6 +368,8 @@ Return ONLY valid JSON:
                 "To get started, I need your GitHub repo details.\n"
                 "What's the owner and repo name? (e.g., 'facebook' and 'react')"
             )
+            # 🟢 FORCE PRINT TO TERMINAL
+            await self._terminal_print("BOT", bot_response)
             return {"session_id": sid, "bot_response": bot_response, "suggestions": []}
 
         # Fetch README (owner/repo). If your GithubService only supports repo_url, we fallback.
@@ -305,6 +401,8 @@ Return ONLY valid JSON:
                 "Don't worry — we can fix this easily!\n"
                 "Would you like to retry with a token or specify a different branch?"
             )
+            # 🟢 FORCE PRINT TO TERMINAL
+            await self._terminal_print("BOT", bot_response)
             return {
                 "session_id": sid,
                 "bot_response": bot_response,
@@ -335,6 +433,9 @@ Return ONLY valid JSON:
         extracted.setdefault("cloud_provider", self.UNKNOWN_PROVIDER)
 
         bot_response = self._normalize_bot_message(greeting, is_complete=False)
+        
+        # 🟢 FORCE PRINT TO TERMINAL
+        await self._terminal_print("BOT", bot_response)
 
         session = ConversationSession(
             session_id=sid,
@@ -390,6 +491,9 @@ Return ONLY valid JSON:
             raise ValueError(f"Session {session_id} not active")
 
         session.messages.append({"role": "user", "content": user_message})
+        
+        # 🟢 FORCE PRINT TO TERMINAL
+        await self._terminal_print("USER", user_message)
 
         raw = await self._call_llm(session)
         try:
@@ -457,6 +561,10 @@ Return ONLY valid JSON:
             data["message"] = self._normalize_bot_message(data["message"], is_complete=False)
 
         session.messages.append({"role": "assistant", "content": data["message"]})
+        
+        # 🟢 FORCE PRINT TO TERMINAL
+        await self._terminal_print("BOT", data["message"])
+
         logger.info("[%s] Bot Response:\n%s", session_id, data["message"])
         logger.info("[%s] Collected Params: %s", session_id, json.dumps(session.collected_parameters, indent=2))
 
@@ -646,6 +754,124 @@ Return ONLY valid JSON:
         return params
 
     # ---------------------------
+    # Service-Specific Turn Guidance
+    # ---------------------------
+    def _build_service_specific_guidance(
+        self,
+        session: ConversationSession,
+        provider: str,
+        environment: str
+    ) -> str:
+        """
+        Build service-specific turn guidance based on detected services.
+        
+        Args:
+            session: Current conversation session
+            provider: Cloud provider (aws, gcp, azure, digitalocean)
+            environment: Environment type (dev, prod)
+            
+        Returns:
+            String with service-specific guidance for the LLM
+        """
+        detected_services = session.collected_parameters.get("detected_services", {})
+        provider_services = detected_services.get(provider, [])
+        
+        if not provider_services:
+            return ""
+        
+        guidance_parts = ["\n\n🔍 **DETECTED SERVICES** (ask about these based on README):\n"]
+        
+        # Database services
+        if any(s in provider_services for s in ["rds", "cloud_sql", "dynamodb", "firestore"]):
+            db_service = "rds" if provider == "aws" else "cloud_sql" if provider == "gcp" else "database"
+            if not session.collected_parameters.get("database_instance_type"):
+                guidance_parts.append(
+                    f"- **Database ({db_service})**: Ask about instance type, storage size, "
+                    f"{'Multi-AZ' if provider == 'aws' else 'high availability'}, backup retention\n"
+                )
+        
+        # Storage services
+        if any(s in provider_services for s in ["s3", "cloud_storage"]):
+            storage_service = "S3" if provider == "aws" else "Cloud Storage"
+            if not session.collected_parameters.get("storage_config"):
+                guidance_parts.append(
+                    f"- **Object Storage ({storage_service})**: Ask about versioning, "
+                    f"lifecycle policies, encryption (default: enabled)\n"
+                )
+        
+        # Serverless compute
+        if any(s in provider_services for s in ["lambda", "cloud_functions"]):
+            func_service = "Lambda" if provider == "aws" else "Cloud Functions"
+            if not session.collected_parameters.get("function_config"):
+                guidance_parts.append(
+                    f"- **Serverless ({func_service})**: Ask about runtime, memory, timeout, "
+                    f"trigger type (HTTP, event, schedule)\n"
+                )
+        
+        # Container orchestration
+        if any(s in provider_services for s in ["ecs", "eks", "gke"]):
+            container_service = "ECS/EKS" if provider == "aws" else "GKE"
+            if not session.collected_parameters.get("container_config"):
+                guidance_parts.append(
+                    f"- **Containers ({container_service})**: Ask about cluster size, "
+                    f"node type, auto-scaling, container registry\n"
+                )
+        
+        # Load balancing
+        if any(s in provider_services for s in ["elb", "cloud_load_balancing"]):
+            lb_service = "ELB (ALB/NLB)" if provider == "aws" else "Cloud Load Balancing"
+            if environment == "production" and not session.collected_parameters.get("load_balancer_type"):
+                guidance_parts.append(
+                    f"- **Load Balancer ({lb_service})**: For production, ask about LB type "
+                    f"(HTTP/HTTPS vs TCP), SSL certificate, health checks\n"
+                )
+        
+        # CDN
+        if any(s in provider_services for s in ["cloudfront", "cloud_cdn"]):
+            cdn_service = "CloudFront" if provider == "aws" else "Cloud CDN"
+            if not session.collected_parameters.get("cdn_enabled"):
+                guidance_parts.append(
+                    f"- **CDN ({cdn_service})**: Ask if they want global content delivery, "
+                    f"cache settings, SSL/TLS\n"
+                )
+        
+        # Monitoring
+        if any(s in provider_services for s in ["cloudwatch", "cloud_monitoring"]):
+            monitor_service = "CloudWatch" if provider == "aws" else "Cloud Monitoring"
+            if not session.collected_parameters.get("monitoring_config"):
+                guidance_parts.append(
+                    f"- **Monitoring ({monitor_service})**: Ask about log retention, "
+                    f"custom metrics, alerting (SNS/email)\n"
+                )
+        
+        # Messaging/Queues
+        if any(s in provider_services for s in ["sqs", "sns", "pubsub"]):
+            msg_service = "SQS/SNS" if provider == "aws" else "Pub/Sub"
+            if not session.collected_parameters.get("messaging_config"):
+                guidance_parts.append(
+                    f"- **Messaging ({msg_service})**: Ask about queue type, "
+                    f"message retention, dead-letter queue\n"
+                )
+        
+        # DNS
+        if any(s in provider_services for s in ["route53", "cloud_dns"]):
+            dns_service = "Route 53" if provider == "aws" else "Cloud DNS"
+            if not session.collected_parameters.get("dns_config"):
+                guidance_parts.append(
+                    f"- **DNS ({dns_service})**: Ask about domain name, "
+                    f"routing policy (simple, weighted, geolocation)\n"
+                )
+        
+        if len(guidance_parts) > 1:  # More than just the header
+            guidance_parts.append(
+                "\n**IMPORTANT**: Ask about ONE service at a time. "
+                "Reference the README to show you understand their needs.\n"
+            )
+            return "".join(guidance_parts)
+        
+        return ""
+
+    # ---------------------------
     # LLM call
     # ---------------------------
     async def _call_llm(self, session: ConversationSession) -> str:
@@ -775,6 +1001,15 @@ Return ONLY valid JSON:
                     "You can wrap up if you have covered ALL critical topics, otherwise ask 1-2 more questions.\n"
                     "Ensure you've asked about: traffic, HA, storage (based on README DB), IAM (based on README services), monitoring, backups.\n"
                 )
+        
+        # Add service-specific guidance based on detected services
+        service_guidance = self._build_service_specific_guidance(
+            session,
+            provider=cloud_provider,
+            environment=environment
+        )
+        if service_guidance:
+            turn_guidance += service_guidance
 
         context = (
             "\n\n[README Context (authoritative — use this to make intelligent suggestions)]:\n"
@@ -797,8 +1032,8 @@ Return ONLY valid JSON:
 
         body = await self.llm_service.chat_completion(
             messages=messages,
-            temperature=0.15,
-            max_tokens=1200,
+            temperature=0.5,  # Increased to 0.5 for highly descriptive, educational responses
+            max_tokens=1800,  # Sufficient for 8-10 line explanations
             response_format={"type": "json_object"},
             timeout=30,
         )
@@ -824,12 +1059,49 @@ Return ONLY valid JSON:
             "    \"workload_type\": \"...\",\n"
             "    \"language\": \"...\",\n"
             "    \"database_type\": \"...\",\n"
+            "    \"detected_services\": {\n"
+            "      \"aws\": [\"ec2\", \"s3\", \"rds\"],\n"
+            "      \"gcp\": [\"compute_engine\", \"cloud_storage\", \"cloud_sql\"]\n"
+            "    },\n"
             "    ... (all other fields)\n"
             "  },\n"
             "  \"message\": \"... (12-15 line detailed greeting) ...\",\n"
             "  \"suggestions\": [\"AWS\", \"GCP\", \"Azure\", \"DigitalOcean\"]\n"
             "}\n"
             "```\n\n"
+            "### SERVICES TO DETECT:\n\n"
+            "**AWS Services (15)**:\n"
+            "- EC2 (Elastic Compute Cloud) - servers, instances, VMs\n"
+            "- S3 (Simple Storage Service) - object storage, file uploads, static assets\n"
+            "- RDS (Relational Database Service) - PostgreSQL, MySQL, MariaDB\n"
+            "- Lambda - serverless functions, event-driven\n"
+            "- VPC (Virtual Private Cloud) - networking, subnets\n"
+            "- IAM (Identity & Access Management) - permissions, roles\n"
+            "- CloudFront - CDN, content delivery\n"
+            "- EBS (Elastic Block Store) - volumes, persistent disks\n"
+            "- CloudWatch - monitoring, logs, metrics\n"
+            "- ELB (Elastic Load Balancing) - load balancers, ALB, NLB\n"
+            "- DynamoDB - NoSQL, key-value database\n"
+            "- ECS/EKS - containers, Docker, Kubernetes\n"
+            "- SNS/SQS - messaging, notifications, queues\n"
+            "- Route 53 - DNS, domain management\n"
+            "- CloudFormation - infrastructure as code\n\n"
+            "**GCP Services (15)**:\n"
+            "- Compute Engine - servers, instances, VMs\n"
+            "- Cloud Storage - object storage, file uploads\n"
+            "- Cloud SQL - PostgreSQL, MySQL managed databases\n"
+            "- Cloud Functions - serverless functions\n"
+            "- VPC (Virtual Private Cloud) - networking\n"
+            "- IAM (Identity & Access Management) - permissions\n"
+            "- Cloud CDN - content delivery\n"
+            "- Persistent Disk - block storage, volumes\n"
+            "- Cloud Monitoring (Stackdriver) - logs, metrics\n"
+            "- Cloud Load Balancing - load balancers\n"
+            "- Cloud Firestore/Bigtable - NoSQL databases\n"
+            "- GKE (Google Kubernetes Engine) - Kubernetes\n"
+            "- Pub/Sub - messaging, event streaming\n"
+            "- Cloud DNS - domain management\n"
+            "- Deployment Manager - infrastructure as code\n\n"
             "### EXTRACT THESE FIELDS (in extracted_params):\n"
             "- **workload_type**: web_server|api|app_server|database|batch|microservice|fullstack|custom\n"
             "- **workload_description**: 2-3 sentences describing what this project does and what it needs to run\n"
@@ -846,7 +1118,8 @@ Return ONLY valid JSON:
             "- **scale_indicators**: string — any mentions of scale expectations ('millions of users', 'high traffic', 'enterprise', etc.) or 'none'\n"
             "- **suggested_provider**: string — which cloud platform would be BEST for this project and why (aws|gcp|azure|digitalocean)\n"
             "- **suggested_instance**: string — what instance size would work best for dev deployment\n"
-            "- **project_name**: string — inferred project name\n\n"
+            "- **project_name**: string — inferred project name\n"
+            "- **detected_services**: object with 'aws' and 'gcp' arrays listing detected services from the lists above\n\n"
             "### GREETING (the 'message' field) - ABSOLUTELY CRITICAL:\n\n"
             "**YOU MUST WRITE A DETAILED 12-15 LINE GREETING. THIS IS MANDATORY.**\n\n"
             "**EXACT STRUCTURE TO FOLLOW:**\n\n"
@@ -860,7 +1133,7 @@ Return ONLY valid JSON:
             "• **[Background jobs tech]** for [purpose] (if detected)\n"
             "• **Docker** and **docker-compose** for containerization (if detected)\n"
             "• Exposing **port [X]** for [service] and **port [Y]** for [service]\n\n"
-            "Lines 11-12: For this stack, you'll need: [list compute, database, storage, load balancer needs]\n\n"
+            "Lines 11-12: For this stack, you'll need: [list compute, database, storage, load balancer needs with SPECIFIC SERVICE NAMES]\n\n"
             "Lines 13-14: I recommend **[Cloud Platform]** because: [specific reasons tied to detected tech]\n\n"
             "Line 15: **FIRST QUESTION**: Which cloud platform would you like to deploy on: AWS, GCP, Azure, or DigitalOcean?\n\n"
             "**EXAMPLES OF GOOD GREETINGS:**\n\n"
@@ -874,7 +1147,7 @@ Return ONLY valid JSON:
             "• **JWT** for authentication and authorization\n"
             "• **Docker** and **docker-compose** for containerization\n"
             "• Exposing **port 3000** for the Express API and **port 27017** for MongoDB\n\n"
-            "For this stack, you'll need compute instances (EC2/Compute Engine) for Node.js, managed MongoDB (Atlas) or self-hosted with persistent storage, and Redis (ElastiCache/self-hosted) for caching. For production, we'll also need a load balancer for high availability.\n\n"
+            "For this stack, you'll need **EC2/Compute Engine** for Node.js, **RDS/Cloud SQL** or **DynamoDB/Firestore** for MongoDB, **ElastiCache/Cloud Memorystore** for Redis, and **S3/Cloud Storage** for file uploads. For production, we'll also need **ELB/Cloud Load Balancing** for high availability.\n\n"
             "I recommend **AWS** because it offers seamless MongoDB Atlas integration, managed ElastiCache for Redis, excellent Node.js support with Elastic Beanstalk or EC2, and Docker container support with ECS.\n\n"
             "Which cloud platform would you like to deploy on: AWS, GCP, Azure, or DigitalOcean?\n"
             "```\n\n"
@@ -888,7 +1161,7 @@ Return ONLY valid JSON:
             "• **Gunicorn** as the WSGI server for production\n"
             "• **Nginx** for reverse proxy and static file serving\n"
             "• Exposing **port 8000** for Django and **port 5432** for PostgreSQL\n\n"
-            "For this stack, you'll need compute instances for Django/Celery workers, managed PostgreSQL (RDS/Cloud SQL) or self-hosted, Redis for Celery broker, and load balancer for production traffic distribution.\n\n"
+            "For this stack, you'll need **EC2/Compute Engine** for Django/Celery workers, **RDS/Cloud SQL** for PostgreSQL, **ElastiCache/Cloud Memorystore** for Redis, and **ELB/Cloud Load Balancing** for production traffic distribution.\n\n"
             "I recommend **AWS** because it offers managed RDS PostgreSQL with automated backups, ElastiCache for Redis, excellent Python support, and Application Load Balancer for traffic distribution.\n\n"
             "Which cloud platform would you like to deploy on: AWS, GCP, Azure, or DigitalOcean?\n"
             "```\n\n"
@@ -898,18 +1171,51 @@ Return ONLY valid JSON:
             "3. List EVERY detected technology as a separate bullet point\n"
             "4. Explicitly mention ALL exposed ports\n"
             "5. The greeting MUST be 12-15 lines minimum\n"
-            "6. Make it feel like you deeply understand their project\n\n"
+            "6. Make it feel like you deeply understand their project\n"
+            "7. When listing cloud services needed, use SPECIFIC SERVICE NAMES (EC2, RDS, S3, not just 'compute' or 'storage')\n\n"
             "### SUGGESTIONS (must be exactly this):\n"
             "[\"AWS\", \"GCP\", \"Azure\", \"DigitalOcean\"]\n\n"
             f"README:\n{readme_content[:15000]}"
         )
         raw = await self.llm_service.chat_completion(
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
+            temperature=0.35,  # Increased from 0.2 to match conversation temperature
             response_format={"type": "json_object"},
             timeout=30,
         )
-        return json.loads(raw)
+        analysis = json.loads(raw)
+        
+        # Use ServiceDetector to enhance detection
+        from app.services.service_detector import ServiceDetector
+        detector = ServiceDetector()
+        
+        # Detect services for both AWS and GCP
+        aws_detected = detector.detect_services(readme_content, provider="aws")
+        gcp_detected = detector.detect_services(readme_content, provider="gcp")
+        
+        # Prioritize services
+        aws_services = detector.prioritize_services(aws_detected)
+        gcp_services = detector.prioritize_services(gcp_detected)
+        
+        # Merge AI detection with pattern-based detection
+        if "extracted_params" not in analysis:
+            analysis["extracted_params"] = {}
+        
+        analysis["extracted_params"]["detected_services"] = {
+            "aws": aws_services[:10],  # Top 10 most relevant
+            "gcp": gcp_services[:10]
+        }
+        
+        # Add service categories for better organization
+        analysis["extracted_params"]["service_categories"] = {
+            "aws": detector.get_service_categories(aws_services[:10], provider="aws"),
+            "gcp": detector.get_service_categories(gcp_services[:10], provider="gcp")
+        }
+        
+        logger.info(f"Detected AWS services: {aws_services[:10]}")
+        logger.info(f"Detected GCP services: {gcp_services[:10]}")
+        
+        return analysis
 
     def _build_readme_context(self, readme: str, extracted: Dict[str, Any], owner: str, repo: str) -> str:
         workload = str(extracted.get("workload_description") or "").strip()
