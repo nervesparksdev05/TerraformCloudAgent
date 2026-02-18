@@ -2,7 +2,7 @@ import axios from 'axios';
 import { signInWithPopup } from 'firebase/auth';
 import { auth, googleProvider } from './firebase';
 
-const FIREBASE_API_KEY = "AIzaSyCW33xFHeQOjnc831Sqae0b1_-2rtpDAaY";
+const FIREBASE_API_KEY = import.meta.env.VITE_FIREBASE_API_KEY;
 const BASE_URL = "https://identitytoolkit.googleapis.com/v1/accounts";
 
 const authClient = axios.create({

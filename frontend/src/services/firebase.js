@@ -2,9 +2,9 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 
 const firebaseConfig = {
-    apiKey: "AIzaSyCW33xFHeQOjnc831Sqae0b1_-2rtpDAaY",
-    authDomain: "terraformcloudagent-7cfb6.firebaseapp.com",
-    projectId: "terraformcloudagent-7cfb6",
+    apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+    authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
 };
 
 const app = initializeApp(firebaseConfig);
