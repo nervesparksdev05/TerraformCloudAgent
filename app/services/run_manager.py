@@ -87,6 +87,29 @@ class RunManager:
     def get_workspace_path(self, run_id: str) -> Path:
         """Get absolute path to workspace directory"""
         return (self.base_dir / run_id).absolute()
+
+    def get_run_files(self, run_id: str) -> Dict[str, str]:
+        """Read Terraform files from workspace and return a dict"""
+        workspace_path = self.get_workspace_path(run_id)
+        files = {}
+        
+        # Standard Terraform files to look for
+        file_map = {
+            "main.tf": "main.tf",
+            "variables.tf": "variables.tf",
+            "outputs.tf": "outputs.tf"
+        }
+        
+        for filename, key in file_map.items():
+            p = workspace_path / filename
+            if p.exists():
+                try:
+                    files[key] = p.read_text(encoding="utf-8")
+                    logger.debug(f"Read {filename} for {run_id}")
+                except Exception as e:
+                    logger.error(f"Failed to read {filename} for {run_id}: {e}")
+                    
+        return files
         
     def _save_request(self, workspace_path: Path, request: AgentRequest) -> None:
         """Save original request for audit"""

@@ -1,4 +1,4 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
@@ -20,28 +20,38 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual Environment
+# ── Virtual Environment ───────────────────────────────────────────────────────
 venv/
 env/
 ENV/
-.venv
+.venv/
 
-# Environment Variables
+# ── Environment & Secrets ─────────────────────────────────────────────────────
 .env
 .env.local
+.env.*.local
+*.pem
+*.key
+*.p12
 
-# IDE
+# Firebase service account credentials (NEVER commit these)
+*-firebase-adminsdk-*.json
+firebase-credentials.json
+service-account*.json
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# Logs
+# ── Logs ──────────────────────────────────────────────────────────────────────
 logs/
 *.log
+log_*.txt
 
-# Terraform
+# ── Terraform ─────────────────────────────────────────────────────────────────
 runs/
 *.tfstate
 *.tfstate.*
@@ -49,24 +59,50 @@ runs/
 .terraform.lock.hcl
 tfplan
 *.tfvars
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
 
-# OS
+# ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+Desktop.ini
 
-# Testing
+# ── Testing ───────────────────────────────────────────────────────────────────
 .pytest_cache/
 .coverage
 htmlcov/
+test_output.log
 
-# Node.js
+# ── Node.js ───────────────────────────────────────────────────────────────────
 node_modules/
-npm-debug.log
-yarn-error.log
+npm-debug.log*
+yarn-error.log*
+yarn-debug.log*
+pnpm-debug.log*
 
-# Temporary/Debug Scripts
+# ── Debug / Scratch Scripts ───────────────────────────────────────────────────
 debug_sessions.py
 check_mongo.py
 test_import.py
 error_log.txt
-*.pem
+debug_output.txt
+bot_debug.txt
+bot_long_debug.txt
+output.txt
+greeting_output.txt
+models_log.txt
+token_results.txt
+quick_test.py
+read_log_tail.py
+reproduce_bug.py
+verify_*.py
+demo_*.py
+check_*.py
+calculate_tokens.py
+
+# ── Token Usage / Per-session Data ───────────────────────────────────────────
+per_session_token_usage.json
+token_usage_results.json

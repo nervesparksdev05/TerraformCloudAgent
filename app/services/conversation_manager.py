@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import secrets
 import sys
+import asyncio
+import re
 from datetime import datetime
 from typing import Any, Dict, Optional, List
 
@@ -41,6 +43,7 @@ Your goal is to gather deployment info through a DEEP, LOGICAL, README-DRIVEN co
 ### 🧠 INTELLIGENCE RULES (CRITICAL):
 1. **Explain First (DETAILED - 8-10 lines)**: NEVER ask a one-line question. ALWAYS explain the concept deeply first.
    - Reference specific findings from the README in your explanations
+   - **DO NOT ASK FOR README**: You already have the analyzed summary and excerpt in the context block below. NEVER ask the user to provide their README again.
    - **CONTEXT LINKING**: You MUST reference the user's previous answer in your explanation (e.g., "Since you chose AWS for development...")
    - Example: "I see from your README that you're using MongoDB and Redis..."
 2. **README-Driven Questions**: ALWAYS reference the README context when asking questions.
@@ -220,6 +223,7 @@ Return ONLY valid JSON:
    - "I see your README shows..."
    - "Your README mentions..."
    - "Based on your [tech] stack from the README..."
+   - **DO NOT ASK FOR README**: You already have the README context. Never ask the user to provide or paste their README.
 2. **Environment-Specific Questioning**:
    - DEV: Simple, cost-focused, 4-6 questions total. Skip scaling, HA, detailed monitoring, traffic estimation.
    - PROD: Detailed, reliability-focused, 10-12 questions total. Cover ALL critical topics.
@@ -419,6 +423,17 @@ Return ONLY valid JSON:
         extracted = analysis.get("extracted_params", {}) if isinstance(analysis, dict) else {}
         greeting = str(analysis.get("message") or "") if isinstance(analysis, dict) else ""
         
+        # SAFEGUARD: If the message itself is a JSON string, extract the actual message from it
+        if greeting.strip().startswith('{'):
+            try:
+                parsed_greeting = json.loads(greeting)
+                if isinstance(parsed_greeting, dict):
+                    # Extract the actual message from the JSON
+                    greeting = str(parsed_greeting.get("message", greeting))
+            except json.JSONDecodeError:
+                # If it fails to parse, just use the greeting as-is
+                pass
+    
         logger.info("[%s] README ANALYSIS:\n%s", sid, json.dumps(extracted, indent=2))
 
         # Seed minimal cross-provider fields (NO cloud_provider here)
@@ -440,7 +455,7 @@ Return ONLY valid JSON:
         session = ConversationSession(
             session_id=sid,
             provider=self.UNKNOWN_PROVIDER,
-            messages=[],
+            messages=[{"role": "assistant", "content": bot_response}],
             collected_parameters=extracted,
             is_complete=False,
             status=ConversationStatus.ACTIVE,
@@ -496,8 +511,15 @@ Return ONLY valid JSON:
         await self._terminal_print("USER", user_message)
 
         raw = await self._call_llm(session)
+        
+        # 1. Use regex to extract JSON object (in case of leading/trailing text)
+        clean_raw = raw.strip()
+        match = re.search(r'(\{.*\})', clean_raw, re.DOTALL)
+        if match:
+            clean_raw = match.group(1)
+            
         try:
-            data = json.loads(raw)
+            data = json.loads(clean_raw)
         except json.JSONDecodeError:
             data = {
                 "message": (
@@ -1033,7 +1055,7 @@ Return ONLY valid JSON:
         body = await self.llm_service.chat_completion(
             messages=messages,
             temperature=0.5,  # Increased to 0.5 for highly descriptive, educational responses
-            max_tokens=1800,  # Sufficient for 8-10 line explanations
+            max_tokens=4000,  # Increased from 3000 to prevent truncation in detailed conversations
             response_format={"type": "json_object"},
             timeout=30,
         )
@@ -1179,11 +1201,19 @@ Return ONLY valid JSON:
         )
         raw = await self.llm_service.chat_completion(
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.35,  # Increased from 0.2 to match conversation temperature
+            temperature=0.50,  # Increased from 0.2 to match conversation temperature
+            max_tokens=4000,  # Increased from 3000 to handle detailed README analysis without truncation
             response_format={"type": "json_object"},
             timeout=30,
         )
-        analysis = json.loads(raw)
+        
+        # 1. Use regex to extract JSON object (in case of leading/trailing text)
+        clean_raw = raw.strip()
+        match = re.search(r'(\{.*\})', clean_raw, re.DOTALL)
+        if match:
+            clean_raw = match.group(1)
+            
+        analysis = json.loads(clean_raw)
         
         # Use ServiceDetector to enhance detection
         from app.services.service_detector import ServiceDetector

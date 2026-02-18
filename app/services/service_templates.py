@@ -6,92 +6,24 @@ Contains detailed templates for 30 cloud services (15 AWS + 15 GCP).
 
 # AWS Service Templates
 AWS_S3_TEMPLATE = """
-### AWS S3 (Simple Storage Service) ###
-
-REQUIRED RESOURCES:
-1) resource "aws_s3_bucket" "main"
-   - bucket = var.s3_bucket_name (must be globally unique)
-   - tags = merge(var.common_tags, {Name = "\${var.project_name}-bucket"})
-
-2) resource "aws_s3_bucket_versioning" "main"
-   - bucket = aws_s3_bucket.main.id
-   - versioning_configuration { status = var.s3_versioning_enabled ? "Enabled" : "Suspended" }
-
-3) resource "aws_s3_bucket_server_side_encryption_configuration" "main"
-   - bucket = aws_s3_bucket.main.id
-   - rule { apply_server_side_encryption_by_default { sse_algorithm = "AES256" } }
-   - CRITICAL: Encryption MUST be enabled by default
-
-4) resource "aws_s3_bucket_public_access_block" "main"
-   - bucket = aws_s3_bucket.main.id
-   - block_public_acls = true
-   - block_public_policy = true
-   - ignore_public_acls = true
-   - restrict_public_buckets = true
-   - CRITICAL: Block ALL public access by default
-
-5) resource "aws_s3_bucket_lifecycle_configuration" "main" (OPTIONAL, if lifecycle_enabled)
-   - bucket = aws_s3_bucket.main.id
-   - rule { id = "transition-to-ia" ; status = "Enabled" ; transition { days = var.s3_lifecycle_transition_days ; storage_class = "STANDARD_IA" } }
-
-VARIABLES REQUIRED:
-- s3_bucket_name (string, description: "Globally unique S3 bucket name")
-- s3_versioning_enabled (bool, default: true)
-- s3_lifecycle_enabled (bool, default: false)
-- s3_lifecycle_transition_days (number, default: 30)
-
-OUTPUTS REQUIRED:
-- s3_bucket_id, s3_bucket_arn, s3_bucket_domain_name
+### AWS S3 ###
+Resources:
+1) aws_s3_bucket: name=var.s3_bucket_name
+2) aws_s3_bucket_versioning: status=Enabled
+3) aws_s3_bucket_server_side_encryption_configuration: sse_algorithm=AES256
+4) aws_s3_bucket_public_access_block: block_public_acls/policy=true
+Variables: s3_bucket_name, s3_versioning_enabled
+Outputs: s3_bucket_id, s3_bucket_arn
 """
 
 AWS_RDS_TEMPLATE = """
-### AWS RDS (Relational Database Service) ###
-
-REQUIRED RESOURCES:
-1) resource "aws_db_subnet_group" "main"
-   - name = "\${var.project_name}-db-subnet-group"
-   - subnet_ids = aws_subnet.private[*].id (MUST use private subnets)
-   - tags = var.common_tags
-
-2) resource "aws_security_group" "rds"
-   - name = "\${var.project_name}-rds-sg"
-   - vpc_id = aws_vpc.main.id
-   - ingress { from_port = var.db_port ; to_port = var.db_port ; protocol = "tcp" ; security_groups = [aws_security_group.app.id] }
-   - CRITICAL: NO public access, only from app security group
-
-3) resource "aws_db_instance" "main"
-   - identifier = "\${var.project_name}-db"
-   - engine = var.db_engine (postgres, mysql, mariadb)
-   - engine_version = var.db_engine_version
-   - instance_class = var.db_instance_class (db.t3.micro for dev, db.t3.medium for prod)
-   - allocated_storage = var.db_storage_gb
-   - storage_type = "gp3"
-   - storage_encrypted = true (MANDATORY)
-   - db_name = var.db_name
-   - username = var.db_username
-   - password = var.db_password (MUST be a variable, never hardcoded)
-   - db_subnet_group_name = aws_db_subnet_group.main.name
-   - vpc_security_group_ids = [aws_security_group.rds.id]
-   - multi_az = var.db_multi_az (true for prod, false for dev)
-   - backup_retention_period = var.db_backup_retention_days (7-35 for prod, 1 for dev)
-   - skip_final_snapshot = var.environment == "dev" ? true : false
-   - final_snapshot_identifier = "\${var.project_name}-final-snapshot"
-   - tags = var.common_tags
-
-VARIABLES REQUIRED:
-- db_engine (string, default: "postgres")
-- db_engine_version (string, default: "15.3")
-- db_instance_class (string, default: "db.t3.micro")
-- db_storage_gb (number, default: 20)
-- db_name (string)
-- db_username (string)
-- db_password (string, sensitive: true)
-- db_port (number, default: 5432)
-- db_multi_az (bool, default: false)
-- db_backup_retention_days (number, default: 7)
-
-OUTPUTS REQUIRED:
-- rds_endpoint, rds_address, rds_port, rds_db_name
+### AWS RDS ###
+Resources:
+1) aws_db_subnet_group: use private subnets
+2) aws_security_group: ingress from app port only
+3) aws_db_instance: engine=var.db_engine, class=var.db_instance_class, storage_encrypted=true, multi_az=var.db_multi_az
+Variables: db_engine, db_instance_class, db_name, db_password (sensitive), db_multi_az
+Outputs: rds_endpoint, rds_port
 """
 
 AWS_LAMBDA_TEMPLATE = """
@@ -283,43 +215,13 @@ OUTPUTS REQUIRED:
 """
 
 GCP_CLOUD_SQL_TEMPLATE = """
-### GCP Cloud SQL (Managed Database) ###
-
-REQUIRED RESOURCES:
-1) resource "google_sql_database_instance" "main"
-   - name = "\${var.project_name}-db"
-   - database_version = var.db_version ("POSTGRES_15", "MYSQL_8_0")
-   - region = var.gcp_region
-   - settings {
-       tier = var.db_tier ("db-f1-micro" for dev, "db-n1-standard-1" for prod)
-       disk_size = var.db_disk_size_gb
-       disk_type = "PD_SSD"
-       backup_configuration { enabled = true ; start_time = "03:00" ; point_in_time_recovery_enabled = var.db_pitr_enabled }
-       ip_configuration { ipv4_enabled = false ; private_network = google_compute_network.main.id ; require_ssl = true }
-       availability_type = var.db_high_availability ? "REGIONAL" : "ZONAL"
-     }
-
-2) resource "google_sql_database" "main"
-   - name = var.db_name
-   - instance = google_sql_database_instance.main.name
-
-3) resource "google_sql_user" "main"
-   - name = var.db_username
-   - instance = google_sql_database_instance.main.name
-   - password = var.db_password
-
-VARIABLES REQUIRED:
-- db_version (string, default: "POSTGRES_15")
-- db_tier (string, default: "db-f1-micro")
-- db_disk_size_gb (number, default: 20)
-- db_name (string)
-- db_username (string)
-- db_password (string, sensitive: true)
-- db_pitr_enabled (bool, default: true)
-- db_high_availability (bool, default: false)
-
-OUTPUTS REQUIRED:
-- cloud_sql_connection_name, cloud_sql_private_ip, cloud_sql_instance_name
+### GCP Cloud SQL ###
+Resources:
+1) google_sql_database_instance: tier=var.db_tier, ipv4_enabled=false, private_network=id, availability_type=REGIONAL (if HA)
+2) google_sql_database
+3) google_sql_user: password=var.db_password
+Variables: db_version, db_tier, db_name, db_password (sensitive)
+Outputs: cloud_sql_private_ip, cloud_sql_connection_name
 """
 
 GCP_CLOUD_FUNCTIONS_TEMPLATE = """

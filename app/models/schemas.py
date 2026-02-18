@@ -21,6 +21,7 @@ class RunStatus(str, Enum):
     DESTROYING = "destroying"
     DESTROYED = "destroyed"
     FAILED = "failed"
+    REJECTED = "rejected"
 
 
 class AgentRequest(BaseModel):
@@ -93,6 +94,11 @@ class RunResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = Field(
         None,
         description="Additional metadata for the run (e.g. conversation parameters)"
+    )
+
+    approval_info: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Approval details (email sent, token, rejection reason)"
     )
 
     class Config:

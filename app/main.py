@@ -1,4 +1,4 @@
-# app/main.py  ✅ UPDATED (provider chosen inside chat; removed from /conversations)
+# app/main.py  
 
 """
 FastAPI application - Main entry point (Unified)
@@ -6,13 +6,19 @@ Supports both direct execution and interactive workflow modes
 """
 from __future__ import annotations
 
+import asyncio
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from typing import Optional, Dict
 
 from app.core import config
 from app.core.logger import setup_logging, get_logger
+from app.core.auth import get_current_user, get_optional_user
 from app.models.schemas import (
     AgentRequest, RunResponse, RunStatus,
     ChatRequest, ChatResponse
@@ -26,6 +32,8 @@ from app.services.run_manager import RunManager
 from app.services.workflow_engine import WorkflowEngine
 from app.services.llm_generator import LLMGenerator
 from app.services.conversation_manager import ConversationManager
+from app.services.email_service import email_service
+from app.services.user_service import user_service
 
 # Setup logging
 setup_logging(
@@ -82,6 +90,55 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+        "http://localhost:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============================================================================
+# AUTH / USER ENDPOINTS
+# ============================================================================
+
+@app.post("/auth/sync-user")
+async def sync_user(
+    user: Dict = Depends(get_current_user),
+):
+    """
+    Sync the authenticated Firebase user into MongoDB.
+    Call this from the frontend immediately after every login (email or Google).
+    Returns the stored user document.
+    """
+    try:
+        doc = user_service.upsert_user(user)
+        return {"status": "ok", "user": doc}
+    except Exception as e:
+        logger.error(f"Failed to sync user to MongoDB: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to sync user: {str(e)}")
+
+
+@app.get("/auth/me")
+async def get_me(
+    user: Dict = Depends(get_current_user),
+):
+    """
+    Return the current user's MongoDB profile.
+    """
+    uid = user.get("uid") or user.get("user_id")
+    doc = user_service.get_user_by_uid(uid)
+    if not doc:
+        raise HTTPException(status_code=404, detail="User not found in database")
+    return doc
+
+
 # ============================================================================
 # CONVERSATION ENDPOINTS
 # ============================================================================
@@ -92,6 +149,7 @@ async def create_conversation(
     repo: str = "",
     github_token: str = "",
     github_branch: str = "",
+    user: Optional[Dict] = Depends(get_current_user),
 ):
     """
     Start a README-driven conversational session.
@@ -122,7 +180,12 @@ async def create_conversation(
 
 
 @app.post("/conversations/{session_id}/message", response_model=ChatMessageResponse)
-async def send_message(session_id: str, chat_message: ChatMessage, background_tasks: BackgroundTasks):
+async def send_message(
+    session_id: str,
+    chat_message: ChatMessage,
+    background_tasks: BackgroundTasks,
+    user: Optional[Dict] = Depends(get_current_user),
+):
     """
     Send a message in an active conversation.
     Auto-generates Terraform run when conversation completes.
@@ -186,8 +249,209 @@ async def send_message(session_id: str, chat_message: ChatMessage, background_ta
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/conversations/{session_id}/message/stream")
+async def stream_message(
+    session_id: str,
+    chat_message: ChatMessage,
+    user: Optional[Dict] = Depends(get_current_user),
+):
+    """
+    Stream bot responses in real-time using Server-Sent Events (SSE).
+    """
+    import json
+    from app.services.llm_service import AsyncLLMService
+    
+    async def generate():
+        try:
+            session = conversation_manager.get_session(session_id)
+            if not session:
+                yield f"data: {json.dumps({'error': 'Session not found'})}\n\n"
+                return
+
+            # Add user message to session
+            session.messages.append({"role": "user", "content": chat_message.message})
+            logger.info(f"[{session_id}] User message (streaming): {chat_message.message}")
+
+            # Build LLM messages
+            messages = []
+            
+            # Add system prompt
+            messages.append({
+                "role": "system",
+                "content": conversation_manager.SYSTEM_PROMPT + conversation_manager.FRIENDLY_BRIDGE_PROMPT
+            })
+            
+            # Add conversation history
+            for msg in session.messages:
+                messages.append(msg)
+
+            # Stream the LLM response
+            async_llm = AsyncLLMService()
+            full_response = ""
+            
+            async for chunk in async_llm.stream_chat_completion(
+                messages=messages,
+                temperature=0.7,
+                max_tokens=1500
+            ):
+                full_response += chunk
+                # Don't send raw chunks yet - wait to parse JSON first
+
+            # Process the complete response
+            # 1. Use regex to extract JSON object from response (in case there's leading/trailing text)
+            clean_response = full_response.strip()
+            
+            # Simple heuristic: look for the first '{' and last '}'
+            match = re.search(r'(\{.*\})', clean_response, re.DOTALL)
+            if match:
+                clean_response = match.group(1)
+
+            try:
+                data = json.loads(clean_response)
+                # If parsed successfully, message content is the extracted 'message' field
+                message_content = data.get("message", full_response)
+                
+                # SAFEGUARD: If the message itself is a JSON string, extract the actual message from it
+                if isinstance(message_content, str) and message_content.strip().startswith('{'):
+                    try:
+                        parsed_msg = json.loads(message_content)
+                        if isinstance(parsed_msg, dict):
+                            message_content = str(parsed_msg.get("message", message_content))
+                    except json.JSONDecodeError:
+                        pass
+                        
+            except json.JSONDecodeError:
+                # If still not JSON, treat entire response as message (cleaning it up slightly)
+                # If it looks like there were code fences, strip them for a cleaner fallback
+                message_content = full_response
+                if "```json" in message_content:
+                    message_content = message_content.split("```json")[-1].split("```")[0].strip()
+                elif "```" in message_content:
+                    message_content = message_content.split("```")[-1].split("```")[0].strip()
+                
+                data = {
+                    "message": message_content,
+                    "extracted_params": {},
+                    "suggestions": [],
+                    "is_complete": False
+                }
+
+            # Check if conversation is complete
+            session.is_complete = bool(data.get("is_complete", False))
+            
+            # If complete, append cost calculation
+            if session.is_complete:
+                # Apply defaults first
+                conversation_manager._apply_defaults(session.collected_parameters, provider=session.provider)
+                
+                # Calculate cost
+                try:
+                    cost_block = conversation_manager._calculate_cost(
+                        session.collected_parameters, 
+                        provider=session.provider
+                    )
+                    # Append cost to message
+                    message_content += f"\n\n{cost_block}\nAll set! I'll generate your Terraform configuration now."
+                    
+                    # Update data message too so it's consistent
+                    data["message"] = message_content
+                except Exception as e:
+                    logger.error(f"Failed to calculate cost: {e}")
+
+            session.updated_at = datetime.now()
+
+            # Now stream the message content character by character for smooth display
+            chunk_size = 20  # Send 20 characters at a time
+            for i in range(0, len(message_content), chunk_size):
+                chunk = message_content[i:i + chunk_size]
+                yield f"data: {json.dumps({'content': chunk})}\n\n"
+                # Small delay to make streaming visible
+                await asyncio.sleep(0.01)
+
+            # Update session with bot response
+            session.messages.append({"role": "assistant", "content": message_content})
+            
+            # Merge extracted parameters
+            if isinstance(data.get("extracted_params"), dict):
+                conversation_manager._deep_merge(session.collected_parameters, data["extracted_params"])
+
+            # Update provider if chosen
+            chosen = str(session.collected_parameters.get("cloud_provider") or session.provider or "unknown")
+            provider_norm = conversation_manager._normalize_provider(chosen)
+            session.provider = provider_norm
+            
+            if provider_norm in conversation_manager.SUPPORTED_PROVIDERS:
+                session.collected_parameters["cloud_provider"] = provider_norm
+
+            # Save session
+            if conversation_manager.sessions_collection is not None:
+                try:
+                    conversation_manager.sessions_collection.update_one(
+                        {"session_id": session_id},
+                        {"$set": session.dict(exclude={"_id"})},
+                        upsert=True
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to update session {session_id}: {e}")
+
+            # Auto-generate Terraform when conversation completes
+            run_id = None
+            if session.is_complete:
+                try:
+                    terraform_params = conversation_manager.build_terraform_request(session_id)
+                    provider_norm = _normalize_provider(
+                        str(terraform_params.get("cloud_provider") or session.provider or "aws")
+                    )
+                    if provider_norm in SUPPORTED_PROVIDERS:
+                        agent_request = AgentRequest(
+                            request=terraform_params,
+                            provider=provider_norm,
+                            auto_approve=False,
+                        )
+                        run = run_manager.create_run(agent_request)
+                        run.metadata = {
+                            "conversation_params": conversation_manager.get_collected_parameters(session_id),
+                            "session_id": session_id,
+                        }
+                        run_manager.save_run_state(run.run_id, run)
+
+                        try:
+                            conversation_manager.add_run_to_session(session_id, run.run_id)
+                        except Exception:
+                            pass
+
+                        # Launch planning phase in background
+                        asyncio.create_task(
+                            workflow_engine.execute_planning_phase(run.run_id, agent_request)
+                        )
+                        run_id = run.run_id
+                        logger.info("[%s] Terraform generation started (streaming): run_id=%s", session_id, run.run_id)
+                except Exception as e:
+                    logger.error("[%s] Failed to auto-generate Terraform (streaming): %s", session_id, e, exc_info=True)
+
+            # Send completion event
+            completion_data = {
+                'done': True,
+                'is_complete': session.is_complete,
+                'suggestions': data.get('suggestions', []),
+                'collected_parameters': session.collected_parameters
+            }
+            if run_id:
+                completion_data['run_id'] = run_id
+            yield f"data: {json.dumps(completion_data)}\n\n"
+
+        except Exception as e:
+            logger.error(f"[{session_id}] Streaming error: {e}", exc_info=True)
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 @app.get("/conversations/{session_id}")
-async def get_conversation(session_id: str):
+async def get_conversation(
+    session_id: str,
+    user: Optional[Dict] = Depends(get_current_user),
+):
     logger.debug("[%s] Fetching conversation details", session_id)
     session = conversation_manager.get_session(session_id)
     if not session:
@@ -196,7 +460,10 @@ async def get_conversation(session_id: str):
 
 
 @app.get("/sessions")
-async def list_sessions(limit: int = 20):
+async def list_sessions(
+    limit: int = 20,
+    user: Optional[Dict] = Depends(get_current_user),
+):
     try:
         logger.info("Listing sessions (limit=%d)", limit)
         return conversation_manager.list_sessions(limit=limit)
@@ -364,22 +631,22 @@ async def get_run_files(run_id: str):
         workspace_path = run_manager.get_workspace_path(run_id)
         files = {}
 
+        # Standard Terraform files to look for
         for fname, key in [("main.tf", "main_tf"), ("variables.tf", "variables_tf"), ("outputs.tf", "outputs_tf")]:
             p = workspace_path / fname
             if p.exists():
-                files[key] = p.read_text(encoding="utf-8")
+                try:
+                    files[key] = p.read_text(encoding="utf-8")
+                except Exception as e:
+                    logger.warning("[%s] Failed to read %s: %s", run_id, fname, e)
 
-        if not files:
-            raise HTTPException(status_code=500, detail="Terraform files not found in workspace")
-
-        logger.info("[%s] Files retrieved for review", run_id)
+        # Return whatever we found (can be empty dict if just started)
+        logger.info("[%s] Files retrieved for review (%d found)", run_id, len(files))
         return {"run_id": run_id, "files": files, "timestamp": datetime.now().isoformat()}
 
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error("[%s] Failed to read files: %s", run_id, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to read files: {str(e)}")
+        logger.error("[%s] Unexpected error retrieving files: %s", run_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 
 @app.post("/runs/{run_id}/files", response_model=RunResponse)
@@ -417,6 +684,223 @@ async def edit_run_files(run_id: str, files: dict, background_tasks: BackgroundT
 
 async def _revalidate_and_replan(run_id: str, provider: str):
     await workflow_engine.revalidate_and_replan(run_id, provider)
+
+
+# ============================================================================
+# APPROVAL WORKFLOW ENDPOINTS (Email)
+# ============================================================================
+
+@app.post("/runs/{run_id}/send-for-approval")
+async def send_approval_email(
+    run_id: str,
+    user: Dict = Depends(get_current_user)
+):
+    """
+    Send the generated Terraform files to the user's email for approval.
+    """
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    
+    # Verify user owns this run (simple check)
+    if run.metadata and run.metadata.get("user_email") and run.metadata.get("user_email") != user.get("email"):
+        # If run has an email associated, ensure it matches
+        # Skip check if no email in metadata (e.g. created via CLI/API without auth)
+        pass
+
+    # Get Terraform files
+    try:
+        files = run_manager.get_run_files(run_id)
+        if not files or "main.tf" not in files:
+            raise HTTPException(status_code=400, detail="Terraform files not found or incomplete")
+        
+        # Prepare summary
+        summary = {
+            "resources": [] 
+        }
+        # Try to get existing plan summary if available from metadata
+        if run.metadata and "plan_summary" in run.metadata:
+             summary["resources"] = run.metadata["plan_summary"]
+        
+        # Send email
+        user_email = user.get("email")
+        if not user_email:
+             raise HTTPException(status_code=400, detail="User email not found in token")
+
+        success = email_service.send_terraform_approval_email(
+            to_email=user_email,
+            run_id=run_id,
+            terraform_files=files,
+            terraform_summary=summary
+        )
+        
+        if success:
+            # Update run metadata with approval info
+            if not run.approval_info:
+                run.approval_info = {}
+            
+            run.approval_info.update({
+                "email_sent_at": datetime.utcnow().isoformat(),
+                "email_sent_to": user_email,
+                "status": "pending_email_approval"
+            })
+            run_manager.save_run_state(run_id, run)
+            
+            return {"message": "Approval email sent successfully", "email": user_email}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to send email. Check SMTP configuration.")
+            
+    except Exception as e:
+        logger.error(f"Error sending approval email for {run_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error sending email: {str(e)}")
+
+
+@app.get("/approve/{token}")
+async def approve_run_via_email(token: str, background_tasks: BackgroundTasks):
+    """
+    Handle run approval via email link
+    """
+    from fastapi.responses import HTMLResponse
+    
+    data = email_service.verify_approval_token(token)
+    if not data:
+        return HTMLResponse(content="<h1>❌ Invalid or expired token</h1><p>Please request a new approval email.</p>", status_code=400)
+    
+    run_id = data.get("run_id")
+    user_email = data.get("user_email")
+    
+    run = run_manager.get_run(run_id)
+    if not run:
+        return HTMLResponse(content="<h1>❌ Run not found</h1>", status_code=404)
+        
+    if run.status == RunStatus.APPROVED:
+        return HTMLResponse(content=f"<h1>✅ Already Approved</h1><p>Run {run_id} was already approved.</p>")
+    
+    if run.status not in [RunStatus.PLANNED, RunStatus.REVIEWING]:
+         return HTMLResponse(content=f"<h1>⚠️ Cannot Approve</h1><p>Run status is {run.status}. Only PLANNED or REVIEWING runs can be approved.</p>", status_code=400)
+
+    # Update status
+    run = run_manager.update_run_status(run_id, RunStatus.APPROVED)
+    
+    # Update approval metadata
+    if not run.approval_info:
+        run.approval_info = {}
+        
+    run.approval_info.update({
+        "approved_at": datetime.utcnow().isoformat(),
+        "approved_by": user_email,
+        "method": "email_link",
+        "status": "approved"
+    })
+    run_manager.save_run_state(run_id, run)
+    
+    # Trigger Apply Phase
+    background_tasks.add_task(workflow_engine.execute_apply_phase, run_id)
+    
+    # Send confirmation
+    email_service.send_approval_confirmation_email(user_email, run_id, approved=True)
+    
+    return HTMLResponse(content=f"""
+    <html>
+        <head>
+            <title>Run Approved</title>
+            <style>
+                body {{ font-family: sans-serif; text-align: center; padding: 50px; }}
+                .container {{ max-width: 600px; margin: 0 auto; }}
+                h1 {{ color: #10b981; }}
+                p {{ font-size: 18px; color: #4b5563; }}
+                .id {{ background: #f3f4f6; padding: 5px 10px; border-radius: 4px; font-family: monospace; }}
+                .status {{ margin-top: 20px; font-weight: bold; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>✅ Run Approved & Apply Triggered</h1>
+                <p>Run ID: <span class="id">{run_id}</span></p>
+                <p class="status">Terraform Apply has started in the background.</p>
+                <p>You can close this window and check the dashboard for progress.</p>
+            </div>
+        </body>
+    </html>
+    """)
+
+
+@app.get("/reject/{token}")
+async def reject_run_via_email(token: str, reason: str = "Rejected via email"):
+    """
+    Handle run rejection via email link
+    """
+    from fastapi.responses import HTMLResponse
+
+    data = email_service.verify_approval_token(token)
+    if not data:
+        return HTMLResponse(content="<h1>❌ Invalid or expired token</h1><p>Please request a new approval email.</p>", status_code=400)
+    
+    run_id = data.get("run_id")
+    user_email = data.get("user_email")
+    
+    run = run_manager.get_run(run_id)
+    if not run:
+         return HTMLResponse(content="<h1>❌ Run not found</h1>", status_code=404)
+
+    if run.status in [RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.REJECTED]:
+         return HTMLResponse(content=f"<h1>⚠️ Cannot Reject</h1><p>Run status is already {run.status}.</p>", status_code=400)
+
+    # Update status
+    run = run_manager.update_run_status(run_id, RunStatus.REJECTED, error=f"Rejected by user: {reason}")
+    
+    # Update approval metadata
+    if not run.approval_info:
+        run.approval_info = {}
+        
+    run.approval_info.update({
+        "rejected_at": datetime.utcnow().isoformat(),
+        "rejected_by": user_email,
+        "rejection_reason": reason,
+        "method": "email_link",
+        "status": "rejected"
+    })
+    run_manager.save_run_state(run_id, run)
+    
+    # Send confirmation
+    email_service.send_approval_confirmation_email(user_email, run_id, approved=False, reason=reason)
+    
+    return HTMLResponse(content=f"""
+    <html>
+        <head>
+            <title>Run Rejected</title>
+            <style>
+                body {{ font-family: sans-serif; text-align: center; padding: 50px; }}
+                .container {{ max-width: 600px; margin: 0 auto; }}
+                h1 {{ color: #ef4444; }}
+                p {{ font-size: 18px; color: #4b5563; }}
+                .id {{ background: #f3f4f6; padding: 5px 10px; border-radius: 4px; font-family: monospace; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>❌ Run Rejected</h1>
+                <p>Run ID: <span class="id">{run_id}</span></p>
+                <p>The configuration has been rejected and will not be applied.</p>
+            </div>
+        </body>
+    </html>
+    """)
+
+
+@app.get("/runs/{run_id}/approval-status")
+async def get_approval_status(run_id: str, user: Dict = Depends(get_current_user)):
+    """
+    Check the current approval status of a run
+    """
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+        
+    return {
+        "status": run.status,
+        "approval_info": run.approval_info
+    }
 
 
 @app.post("/runs/{run_id}/approve", response_model=RunResponse)
@@ -513,6 +997,25 @@ except ImportError:
 # UTILITY ENDPOINTS
 # ============================================================================
 
+@app.post("/auth/verify")
+async def verify_auth(user: Optional[Dict] = Depends(get_current_user)):
+    """
+    Verify authentication token and return user information.
+    Used by frontend to validate tokens.
+    """
+    if not config.REQUIRE_AUTH:
+        return {"authenticated": False, "message": "Authentication disabled"}
+    
+    return {
+        "authenticated": True,
+        "user": {
+            "uid": user.get("uid"),
+            "email": user.get("email"),
+            "name": user.get("name"),
+        }
+    }
+
+
 @app.get("/health")
 async def health_check():
     return {
@@ -520,6 +1023,7 @@ async def health_check():
         "version": config.APP_VERSION,
         "mode": "interactive",
         "providers": SUPPORTED_PROVIDERS,
+        "auth_required": config.REQUIRE_AUTH,
     }
 
 

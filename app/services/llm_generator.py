@@ -29,45 +29,29 @@ class LLMGenerator:
     BASE_SYSTEM_PROMPT = """\
 You are a **Principal Cloud Architect** and **Terraform Expert**.
 Your goal is to generate **World-Class, Production-Grade** Terraform code.
-The user has complained about "bullshit" code before — DO NOT disappoint them.
 
 ### 🎯 STANDARDS OF EXCELLENCE:
 1.  **Strict Variable Usage**: NEVER hardcode values (CIDRs, instance types, regions, AMIs). define them in `variables.tf`.
-2.  **Professional Naming**: Use clean, consistent naming conventions (e.g., `aws_s3_bucket.app_logs` vs `aws_s3_bucket.b1`).
-3.  **Security First**:
-    -   No open security groups (0.0.0.0/0) for SSH/RDP.
-    -   Databases MUST be in private subnets.
-    -   Encryption enabled everywhere (EBS, S3, RDS).
-4.  **Complete Solutions**: Do not output "skeleton" code. Generate the FULL working infrastructure.
-5.  **Smart Defaults**: If a value isn't provided, pick a sensible, cost-effective default and document it.
+2.  **Professional Naming**: Use clean, consistent naming conventions.
+3.  **Security First**: No open security groups for SSH (never 0.0.0.0/0). Enforce encryption where applicable.
+4.  **Complete Solutions**: Generate FULL working infrastructure, not skeleton code.
+5.  **Smart Defaults**: Use cost-effective defaults if values are missing.
 
-### 🛡️ SPECIFIC REQUIREMENTS:
--   **Compute**: Use `t3.micro` (AWS) / `e2-micro` (GCP) for Dev, but allow overrides via variables.
+### 🛠️ SPECIFIC REQUIREMENTS:
 -   **Structure**:
-    -   `main.tf`: Core infrastructure (VPC, Instances, LBs, SGs).
-    -   `variables.tf`: clearly defined variables with `description` and `default`.
-    -   `outputs.tf`: useful outputs (IPs, URLs, connection strings).
--   **User Data**: You MUST include a `user_data` script that *actually* tries to install the app provided in the README.
-
-### 📝 RULES:
--   **Output ONLY valid JSON** with keys: `main_tf`, `variables_tf`, `outputs_tf`.
--   **No Markdown**: Do not wrap in ```json ... ```.
--   **Comments**: Heavily comment complex sections. Explain *why* you chose a specific resource.
-
-### 🧩 INPUT CONTEXT:
+    -   `main.tf`: Core infrastructure (VPC, Instances, SGs).
+    -   `variables.tf`: Clear definitions with descriptions and defaults.
+    -   `outputs.tf`: Useful outputs (IPs, connection strings).
+-   **User Data**: Include user_data/startup scripts INLINE using heredoc. The script must clone the GitHub repo, install dependencies, and start the app.
+-   **Minimal Comments**: Include concise, essential comments explaining technical choices. DO NOT include long instructional text or deployment guides.
 """
 
     README_BRIDGE_PROMPT = """\
-README-FIRST BEHAVIOR (MANDATORY):
-- The README is your PRIMARY source of truth. Every Terraform resource must be justified by the project's actual needs.
-- Treat workload_description, language, dependencies, ports, database_type, and has_docker as critical inputs.
-- If the README mentions Docker/docker-compose, generate user_data that uses Docker for deployment.
-- If the README mentions a database, provision the appropriate managed database service OR configure the instance with enough storage.
-- User inputs may be blunt or short; infer sensible defaults instead of dropping required resources.
-- Prefer secure, beginner-safe defaults while preserving production readiness.
-- Keep generated Terraform understandable for non-cloud users with concise resource names and tags.
-- Include a comprehensive user_data/startup script that actually deploys the application from the GitHub repo.
-- The generated Terraform should be a COMPLETE, WORKING deployment — not just infrastructure scaffolding.
+### 🚨 MANDATORY CONSTRAINTS:
+- Use the README as your primary source of truth for workloads, languages, and ports.
+- Ensure the output is a COMPLETE, WORKING deployment.
+- NO instructional comments. Keep comments technical and brief.
+- RETURN ONLY A JSON OBJECT with keys: "main_tf", "variables_tf", "outputs_tf".
 """
 
     # -----------------------------
@@ -78,7 +62,15 @@ PROVIDER TARGET: AWS
 
 REQUIRED IN main.tf (IN THIS ORDER):
 1) terraform + required_providers (aws,tls)
-2) provider "aws" using var.aws_region and default_tags
+2) provider "aws" using var.aws_region and default_tags block:
+   default_tags {
+     tags = {
+       Environment = var.environment
+       Project     = var.project_name
+       ManagedBy   = "Terraform"
+       CostCenter  = var.project_name
+     }
+   }
 3) data sources:
    - data "aws_ami" "selected" (NO hardcoded AMI IDs)
    - data "aws_availability_zones" "available"
@@ -86,14 +78,32 @@ REQUIRED IN main.tf (IN THIS ORDER):
    - data "aws_iam_policy_document" "instance_policy" (CloudWatch + SSM always, plus user's iam_services)
 4) tls_private_key + aws_key_pair
 5) VPC + public subnets + IGW + route table + associations (use var.vpc_cidr, var.subnet_count)
+   - Enable VPC flow logs (optional, comment out by default)
 6) security group:
    - ingress for app ports from ports param (HTTP/HTTPS default if none)
    - ingress SSH only from var.ssh_allowed_cidrs (never 0.0.0.0/0)
+   - Add descriptive names to each rule
 7) IAM role + inline policy + instance profile
 8) aws_instance "main" with:
    - root_block_device (encrypted=true, size/type vars)
    - metadata_options (IMDSv2 required)
-9) Optional load balancer if var.load_balancer_type != "none"
+   - monitoring = true (enable detailed monitoring)
+   - tags with Name, Environment, Project
+9) CloudWatch alarms (PRODUCTION ONLY):
+   - CPU utilization > 80%
+   - Status check failed
+   - (Optional) Memory and disk alarms via CloudWatch agent
+10) Optional load balancer if var.load_balancer_type != "none"
+11) Backend configuration (as comments):
+    # terraform {
+    #   backend "s3" {
+    #     bucket         = "terraform-state-ACCOUNT_ID"
+    #     key            = "PROJECT_NAME/terraform.tfstate"
+    #     region         = "us-east-1"
+    #     encrypt        = true
+    #     dynamodb_table = "terraform-state-lock"
+    #   }
+    # }
 
 VARIABLES.TF MUST INCLUDE:
 - aws_region, environment, project_name
@@ -103,11 +113,13 @@ VARIABLES.TF MUST INCLUDE:
 - ssh_allowed_cidrs (list(string))
 - ports (list(object({port=number, protocol=string, source_cidr=string, description=string})))
 - load_balancer_type (string)
+- enable_monitoring (bool, default=true for prod)
 
 OUTPUTS.TF MUST INCLUDE:
 - instance_ids, public_ips, private_ips
 - ssh_private_key (sensitive)
 - vpc_id, security_group_id, iam_role_arn
+- connection_string (how to SSH to instances)
 """
 
     GCP_TEMPLATE = """\
@@ -222,33 +234,11 @@ OUTPUTS.TF MUST INCLUDE:
 """
 
     CI_CD_TEMPLATE = """
-You are an expert DevOps Engineer specializing in GitHub Actions for Terraform.
-Generate a valid `.github/workflows/deploy.yml` file for {provider}.
-
-REQUIREMENTS:
-1.  **Triggers**:
-    -   `pull_request` to `main`: Run `terraform plan`.
-    -   `push` to `main`: Run `terraform apply -auto-approve`.
-    -   `workflow_dispatch`: Manual trigger.
-
-2.  **Steps**:
-    -   Checkout code.
-    -   Setup Terraform (hashicorp/setup-terraform).
-    -   Configure Cloud Credentials (use secrets).
-    -   `terraform fmt -check`
-    -   `terraform init`
-    -   `terraform validate`
-    -   `terraform plan` (on PR)
-    -   `terraform apply` (on push to main)
-
-3.  **Secrets to Use** (Use these exact names):
-    -   AWS: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
-    -   GCP: `GCP_SA_KEY` (JSON)
-    -   Azure: `AZURE_CREDENTIALS` (JSON)
-    -   DigitalOcean: `DO_TOKEN`
-
-OUTPUT:
-Return ONLY the raw YAML content. No markdown fences.
+Generate a valid `.github/workflows/deploy.yml` for {provider}.
+Triggers: PR/Push to main.
+Steps: Checkout, Setup Terraform, Init, Validate, Plan (PR), Apply (Push, auto-approve).
+Use secrets: AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or GCP_SA_KEY or AZURE_CREDENTIALS or DO_TOKEN.
+Output ONLY raw YAML. No markdown.
 """
 
     def __init__(self) -> None:
@@ -275,7 +265,7 @@ Return ONLY the raw YAML content. No markdown fences.
             raw = self.llm_service.chat_completion(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                max_tokens=1500,
+                max_tokens=4000,
                 timeout=20,
             )
             # Cleanup potential markdown fences
@@ -287,7 +277,7 @@ Return ONLY the raw YAML content. No markdown fences.
 
     def _post_process_code(self, bundle: TerraformBundle) -> TerraformBundle:
         """
-        Run terraform fmt and validate on the generated code.
+        Run terraform fmt, validate, and security checks on the generated code.
         If tools are missing or validation fails, return original bundle with logs.
         """
         # Check if terraform is installed
@@ -337,7 +327,9 @@ Return ONLY the raw YAML content. No markdown fences.
                 )
                 logger.info("Terraform code validated successfully.")
             except subprocess.CalledProcessError as e:
-                logger.error("terraform validate failed: %s", e.stderr.decode())
+                # Decode with error handling to prevent UnicodeEncodeError from terraform's Unicode box chars
+                error_msg = e.stderr.decode('utf-8', errors='replace') if e.stderr else "Unknown error"
+                logger.error("terraform validate failed: %s", error_msg)
                 # We still return the bundle, but logs will show the error.
                 # In a future iteration, we could retry generation.
 
@@ -545,7 +537,8 @@ Return ONLY the raw YAML content. No markdown fences.
         has_docker = p.get("has_docker", False)
         database_type = p.get("database_type", "none")
 
-        prompt = f"""Generate the BEST POSSIBLE production-grade Terraform configuration for {provider_display}.
+        prompt = f"""### 🧩 INPUT CONTEXT:
+Generate the BEST POSSIBLE production-grade Terraform configuration for {provider_display}.
 This Terraform should FULLY deploy the project from GitHub repo: {github_owner}/{github_repo}
 
 WORKLOAD: {p.get('workload_description', p.get('service_type', 'web server'))}
@@ -596,23 +589,35 @@ CRITICAL REQUIREMENTS:
         return prompt
 
     def _call(self, user_prompt: str, system_prompt: str) -> TerraformBundle:
-        raw = self.llm_service.chat_completion(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.1,
-            max_tokens=4096,
-            response_format={"type": "json_object"},
-            timeout=30,
-        )
-        data = json.loads(raw)
+        logger.debug("Calling Gemini for Terraform generation")
+        try:
+            raw = self.llm_service.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                max_tokens=8192,
+                response_format={"type": "json_object"},
+                timeout=60,
+            )
+            data = json.loads(raw)
+            logger.info("Gemini response parsed successfully. Keys found: %s", list(data.keys()))
+            
+            # Check for empty content
+            for key in ("main_tf", "variables_tf", "outputs_tf"):
+                if not data.get(key):
+                    logger.warning("Gemini returned empty content for %s", key)
 
-        for key in ("main_tf", "variables_tf", "outputs_tf"):
-            val = data.get(key, "")
-            if isinstance(val, dict):
-                data[key] = json.dumps(val, indent=2)
-            else:
-                data[key] = str(val) if val else ""
+            for key in ("main_tf", "variables_tf", "outputs_tf"):
+                val = data.get(key, "")
+                if isinstance(val, dict):
+                    data[key] = json.dumps(val, indent=2)
+                else:
+                    data[key] = str(val) if val else ""
 
-        return TerraformBundle(**data)
+            return TerraformBundle(**data)
+        except Exception as e:
+            logger.error("Failed to generate Terraform via Gemini: %s", e, exc_info=True)
+            # Return empty bundle rather than crashing background task
+            return TerraformBundle(main_tf="", variables_tf="", outputs_tf="")

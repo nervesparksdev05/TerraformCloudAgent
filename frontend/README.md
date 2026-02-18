@@ -1,77 +1,70 @@
-# Terraform Agent - Streamlit Frontend
+# TerraformCloudAgent — Frontend
 
-A conversational interface for deploying multi-cloud infrastructure with Terraform (AWS, GCP, Azure, DigitalOcean).
+React + Vite frontend for the TerraformCloudAgent application.
 
-## Features
+## Stack
 
-- **💬 Conversational Deployment**: Chat with an AI assistant to define your infrastructure
-- **📄 Terraform Review**: Review and edit generated Terraform configurations
-- **⚙️ Deployment Management**: Approve, deploy, and destroy infrastructure
-- **🔒 Production-Ready**: Built-in security validation and best practices
+- **React 18** — UI framework
+- **Vite** — Build tool and dev server
+- **Firebase JS SDK** — Google OAuth and email/password authentication
+- **Axios** — HTTP client for backend API calls
+- **Lucide React** — Icon library
 
-## Running the Frontend
-
-### Prerequisites
-
-1. Backend server running on `http://localhost:8000`
-2. Python 3.11+ with dependencies installed
-
-### Start the Frontend
+## Getting Started
 
 ```bash
-# From the frontend directory
-streamlit run app.py
+npm install
+npm run dev
+# Runs at http://localhost:5174
 ```
 
-The app will open in your browser at `http://localhost:8501`.
+## Environment
 
-## Usage
+The frontend reads `VITE_API_BASE_URL` from `.env` (defaults to `http://localhost:8000`).
 
-### 1. Start a Conversation
-
-Click "Start Conversation" in the sidebar to begin.
-
-### 2. Chat with the Bot
-
-Answer the bot's questions about your infrastructure needs:
-- Stage 1: workload type, workload description, cloud provider, region, environment
-- Stage 2: instance count, instance type, operating system
-- Stage 3: storage size and storage type
-- Stage 4: ports, SSH CIDRs, load balancer type
-- Stage 5: IAM services/actions and IAM role name
-- Stage 6: monitoring, detailed monitoring, autoscaling, backups, log retention
-
-### 3. Generate Terraform
-
-Once all parameters are collected, click "Generate Terraform Configuration".
-
-### 4. Review & Deploy
-
-- Review the generated Terraform files
-- Approve to deploy or reject to start over
-- Manage and destroy infrastructure as needed
-
-## Architecture
-
-```
-frontend/
-├── app.py              # Main Streamlit application
-├── api_client.py       # Backend API client
-├── components/         # Reusable UI components
-└── README.md          # This file
+```env
+VITE_API_BASE_URL=http://localhost:8000
 ```
 
-## API Endpoints Used
+## Structure
 
-- `POST /conversations` - Start new conversation
-- `POST /conversations/{id}/message` - Send message
-- `GET /conversations/{id}` - Get conversation state
-- `POST /conversations/{id}/generate` - Generate Terraform
-- `GET /runs/{id}` - Get run status
-- `GET /runs/{id}/files` - Get Terraform files
-- `POST /runs/{id}/approve` - Deploy infrastructure
-- `POST /runs/{id}/destroy` - Destroy infrastructure
+```
+src/
+├── pages/
+│   ├── WelcomePage.jsx      # New chat form — GitHub owner, repo, token (private repos), branch
+│   └── WorkspacePage.jsx    # Main workspace with three tabs:
+│                            #   Conversation | File Review (edit) | Lifecycle
+├── components/
+│   ├── common/              # Button, Card, Input, Badge
+│   ├── features/
+│   │   └── chat/            # ChatPanel, ChatMessage, ChatInput
+│   │                        # CodeViewer (read-only), CodeEditor (inline edit)
+│   └── layout/              # Sidebar (session list, navigation)
+├── services/
+│   ├── client.js            # Axios instance + all API methods
+│   ├── api.js               # Re-exports from client.js
+│   ├── auth.js              # Firebase REST API + Google OAuth (signInWithPopup)
+│   └── firebase.js          # Firebase app initialization
+├── hooks/
+│   ├── useAuth.js           # Auth state from localStorage
+│   └── useSession.js        # Session/conversation state
+├── App.jsx                  # Root component, routing between Login/Welcome/Workspace
+└── Login.jsx                # Email/password + Google sign-in UI
+```
 
-## Configuration
+## Key Features
 
-The frontend connects to the backend at `http://localhost:8000` by default. To change this, modify the `get_api_client()` function in `app.py`.
+- **Google Sign-In** via Firebase popup (`signInWithGoogle`)
+- **Email/password** sign-up and sign-in
+- **User sync** — calls `POST /auth/sync-user` after every login to persist user in MongoDB
+- **Streaming chat** — uses `fetch` with SSE to stream bot responses token-by-token
+- **Inline Terraform editing** — CodeEditor component with Edit/Save/Cancel per file
+- **AI re-generation** — natural language feedback sent to `POST /runs/{id}/edit`
+- **Private repo support** — GitHub token and branch fields on the new chat form
+
+## Build
+
+```bash
+npm run build
+# Output in dist/
+```

@@ -5,11 +5,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# === OpenAI ===
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
-
-
 # === GitHub Configuration ===
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
@@ -20,8 +15,8 @@ DEFAULT_PROVIDER = os.getenv("DEFAULT_PROVIDER", "aws")
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017/terraform_agent")
 MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "terraform_agent")
 
-# === Google Gemini Configuration (Fallback) ===
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+# === Google Gemini Configuration (Primary LLM Provider) ===
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 
 # === Langfuse Configuration ===
@@ -30,14 +25,34 @@ LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
 LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
 ENABLE_TRACING = bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
 
-# Validate required variables
-if not OPENAI_API_KEY:
-    # Log warning instead of error, as LLMService handles provider selection
-    print("WARNING: OPENAI_API_KEY not set. OpenAI will not be available.")
+# === Firebase Authentication ===
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID")
+FIREBASE_SERVICE_ACCOUNT_PATH = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "./firebase-service-account.json")
+FIREBASE_API_KEY = os.getenv("FIREBASE_API_KEY")
+FIREBASE_AUTH_DOMAIN = os.getenv("FIREBASE_AUTH_DOMAIN")
+REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() == "true"
 
-if not GOOGLE_API_KEY:
-    # Log warning instead of error since it's a fallback
-    print("WARNING: GOOGLE_API_KEY/GEMINI_API_KEY not set. Gemini will not be available.")
+# === SMTP Email Configuration ===
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL")
+SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Terraform Cloud Agent")
+SEND_EMAIL_ALERTS = os.getenv("SEND_EMAIL_ALERTS", "true").lower() == "true"
+
+# Approval token settings
+APPROVAL_TOKEN_SECRET = os.getenv("APPROVAL_TOKEN_SECRET", "change-this-secret-key")
+APPROVAL_TOKEN_EXPIRY_HOURS = int(os.getenv("APPROVAL_TOKEN_EXPIRY_HOURS", "24"))
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+
+# Validate required variables
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY is required. Please set it in your .env file.")
+
+if REQUIRE_AUTH and not FIREBASE_PROJECT_ID:
+    raise ValueError("FIREBASE_PROJECT_ID is required when REQUIRE_AUTH=true. Please set it in your .env file.")
+
 
 valid_providers = ["aws", "gcp", "azure", "digitalocean"]
 if DEFAULT_PROVIDER not in valid_providers:

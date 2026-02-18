@@ -20,14 +20,6 @@ from app.services.workspace_manager import WorkspaceManager
 
 logger = get_logger(__name__)
 
-# Optional security checker — import if available
-try:
-    from app.services.security import SecurityChecker
-    _SECURITY_AVAILABLE = True
-except ImportError:
-    _SECURITY_AVAILABLE = False
-
-
 class WorkflowEngine:
     """Handles background execution of Terraform workflows."""
 
@@ -35,8 +27,7 @@ class WorkflowEngine:
         self.run_manager = RunManager()
         self.llm_generator = LLMGenerator()
         self.workspace_manager = WorkspaceManager()
-        self.security_checker = SecurityChecker() if _SECURITY_AVAILABLE else None
-
+        
     # ================================================================
     # PLANNING PHASE
     # ================================================================
