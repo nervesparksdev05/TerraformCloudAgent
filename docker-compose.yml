@@ -1,0 +1,27 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: terraform-backend
+    container_name: terraform-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./runs:/app/runs       # Persist Terraform state/workspace
+      - ./logs:/app/logs       # Persist application logs
+      # === FIREBASE AUTH ===
+      # If REQUIRE_AUTH=true, uncomment the line below and ensure the JSON file exists:
+      # - ./terraformcloudagent-7cfb6-firebase-adminsdk-fbsvc-0fad469fa4.json:/app/terraformcloudagent-7cfb6-firebase-adminsdk-fbsvc-0fad469fa4.json
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # If using local network for DB
+    # network_mode: "host" 
