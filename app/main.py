@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+import os
+import redis.asyncio as redis
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -19,6 +21,7 @@ from typing import Optional, Dict
 from app.core import config
 from app.core.logger import setup_logging, get_logger
 from app.core.auth import get_current_user, get_optional_user
+from app.rate_limiter import check_rate_limit
 from app.models.schemas import (
     AgentRequest, RunResponse, RunStatus,
     ChatRequest, ChatResponse
@@ -48,6 +51,9 @@ workflow_engine = WorkflowEngine()
 llm_generator = LLMGenerator()
 conversation_manager = ConversationManager()
 
+# Global Redis client
+redis_client: Optional[redis.Redis] = None
+
 logger.info(f"Starting {config.APP_NAME} v{config.APP_VERSION}")
 logger.info("Mode: Interactive Workflow")
 logger.info(f"Workspace Directory: {config.WORKSPACE_BASE_DIR}")
@@ -73,12 +79,29 @@ SUPPORTED_PROVIDERS = ["aws", "gcp", "azure", "digitalocean"]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Application started - Interactive Workflow Mode")
+    global redis_client
+    logger.info("Application starting - Interactive Workflow Mode")
+    
+    # Initialize Redis connection
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    try:
+        redis_client = redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+        await redis_client.ping()
+        logger.info(f"Connected to Redis at {redis_url}")
+    except Exception as e:
+        logger.error(f"Failed to connect to Redis: {e}")
+        redis_client = None
+
     logger.info(
         f"Supported providers: {', '.join([p.upper() if p!='digitalocean' else 'DigitalOcean' for p in SUPPORTED_PROVIDERS])}"
     )
     logger.info("Human-in-the-loop deployment with review, chat, and approval")
+    
     yield
+    
+    if redis_client:
+        await redis_client.close()
+        logger.info("Redis connection closed")
     logger.info("Application shutting down")
 
 
@@ -98,11 +121,18 @@ app.add_middleware(
         "http://localhost:5174",
         "http://localhost:5175",
         "http://localhost:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/health")
+async def health_check():
+    """Unauthenticated health check endpoint."""
+    return {"status": "ok"}
 
 # ============================================================================
 # AUTH / USER ENDPOINTS
@@ -191,6 +221,11 @@ async def send_message(
     Auto-generates Terraform run when conversation completes.
     """
     logger.info("[%s] Received message request", session_id)
+    
+    # Apply Rate Limiting
+    if user:
+        await check_rate_limit(user.get("uid", "anonymous"), redis_client)
+
     try:
         session = conversation_manager.get_session(session_id)
         if not session:
@@ -262,6 +297,10 @@ async def stream_message(
     from app.services.llm_service import AsyncLLMService
     
     async def generate():
+        # Apply Rate Limiting
+        if user:
+            await check_rate_limit(user.get("uid", "anonymous"), redis_client)
+            
         try:
             session = conversation_manager.get_session(session_id)
             if not session:
