@@ -1,12 +1,14 @@
-"""llm_generator.py — TerraBot: GCP-only Terraform generator powered by Gemini."""
+"""llm_generator.py — TerraBot: Multi-cloud Terraform generator powered by Gemini + MCP."""
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
+from app.services import langfuse_service
 from app.services.llm_service import LLMService
 from app.core import config
 from app.core.logger import get_logger
@@ -22,6 +24,7 @@ class LLMGenerator:
 You are a senior GCP Terraform engineer. Generate complete, production-ready Terraform for Google Cloud.
 
 RULES:
+- When "MCP REGISTRY CONTEXT" is provided, strictly adhere to the module versions, resource schemas, and argument structures found in it. This is your source of truth for avoiding syntax errors.
 - Never hardcode values — always use var.* in main.tf
 - Every variable must have type, description, and a sensible default in variables.tf
 - SSH must NEVER allow 0.0.0.0/0 — use var.ssh_allowed_cidrs
@@ -49,7 +52,7 @@ Output ONLY raw YAML — no code fences, no explanation.
         if isinstance(params, str):
             try:
                 params = json.loads(params)
-            except Exception:
+            except json.JSONDecodeError:
                 params = {}
         if not isinstance(params, dict):
             params = {}
@@ -62,7 +65,14 @@ Output ONLY raw YAML — no code fences, no explanation.
             if k in params and not isinstance(params[k], list):
                 params[k] = []
 
-        bundle = self._call(self._build_prompt(params), session_id=session_id)
+        user_prompt = self._build_prompt(params)
+        
+        # 1. Gather MCP context synchronously
+        mcp_context = self._gather_mcp_context_sync(user_prompt, session_id)
+        if mcp_context:
+            user_prompt += f"\n\n--- MCP REGISTRY CONTEXT ---\n{mcp_context}\n----------------------------"
+
+        bundle = self._call(user_prompt, session_id=session_id)
         bundle.github_workflow_yaml = self._generate_workflow(session_id=session_id)
         return self._post_process(bundle)
 
@@ -269,9 +279,149 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
 """
 
     # ── Internals ──────────────────────────────────────────────────────────────
+    
+    def _gather_mcp_context_sync(self, prompt: str, session_id: str = None) -> str:
+        if not config.ENABLE_TERRAFORM_MCP:
+            return ""
+        try:
+            # If we're already inside a running event loop (FastAPI background task),
+            # use asyncio.get_event_loop().run_until_complete() via run_in_executor
+            # to avoid the RuntimeError from asyncio.run() nesting.
+            try:
+                loop = asyncio.get_running_loop()
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(asyncio.run, self._gather_mcp_context_async(prompt, session_id))
+                    return future.result(timeout=120)
+            except RuntimeError:
+                # No running loop — safe to call asyncio.run() directly
+                return asyncio.run(self._gather_mcp_context_async(prompt, session_id))
+        except Exception as e:
+            logger.error("Failed to gather MCP context: %s", e)
+            return ""
+
+    async def _gather_mcp_context_async(self, prompt: str, session_id: str = None) -> str:
+        try:
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+            import google.generativeai as genai
+            from google.generativeai.types import Tool, FunctionDeclaration
+        except ImportError as e:
+            logger.warning("mcp package missing, skipping MCP context generation: %s", e)
+            return ""
+
+        # Create trace for context gathering
+        trace = langfuse_service.create_trace(
+            name="mcp-context-gather",
+            session_id=session_id,
+            input=prompt
+        )
+
+        server_params = StdioServerParameters(
+            command="docker",
+            args=["run", "-i", "--rm", "hashicorp/terraform-mcp-server", "--toolsets=registry"],
+        )
+
+        try:
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    tools_response = await session.list_tools()
+                    
+                    def _sanitize_schema(schema: dict) -> dict:
+                        """Recursively remove unsupported validation keys from JSON schema for Gemini compatibility."""
+                        # Gemini only supports basic OpenAPI schema. Drop extended JSON schema keywords.
+                        drop_keys = {"default", "minimum", "maximum", "minLength", "maxLength", "pattern", "additionalProperties"}
+                        cleaned = {}
+                        for k, v in schema.items():
+                            if k in drop_keys:
+                                continue
+                            if isinstance(v, dict):
+                                cleaned[k] = _sanitize_schema(v)
+                            elif isinstance(v, list) and k not in ("required", "enum"):
+                                cleaned[k] = [_sanitize_schema(i) if isinstance(i, dict) else i for i in v]
+                            else:
+                                cleaned[k] = v
+                        # Gemini requires `type: object` for the root
+                        if schema.get("type") == "object" and "properties" not in cleaned:
+                            cleaned["properties"] = {}
+                        return cleaned
+
+                    genai_tools = []
+                    for t in tools_response.tools:
+                        genai_tools.append(
+                            Tool(
+                                function_declarations=[
+                                    FunctionDeclaration(
+                                        name=t.name,
+                                        description=t.description,
+                                        parameters=_sanitize_schema(t.inputSchema)
+                                    )
+                                ]
+                            )
+                        )
+                    
+                    gather_system = (
+                        "You are an AI context-gathering agent. Read the user's infrastructure request. "
+                        "Determine if you need to look up documentation from the Terraform Registry "
+                        "(like 'get_provider_details' or 'search_modules') to understand complex properties or syntaxes. "
+                        "Use your tools to query the registry. Once you have enough context, reply with a focused "
+                        "technical summary of the module versions and resource arguments needed to write the code. "
+                        "Do NOT generate the actual `.tf` code. ONLY summarize the registry data for the coder."
+                    )
+                    
+                    model = genai.GenerativeModel(
+                        model_name=config.GEMINI_MODEL,
+                        system_instruction=gather_system,
+                        tools=genai_tools
+                    )
+                    chat = model.start_chat()
+                    response = chat.send_message(prompt)
+                    
+                    # Intercept up to 5 tool calls
+                    for _ in range(5):
+                        if not response.candidates:
+                            break
+                        part = response.candidates[0].content.parts[0]
+                        if not getattr(part, "function_call", None):
+                            break  # Native text response
+                        
+                        fc = part.function_call
+                        logger.info("MCP Tool called: %s", fc.name)
+                        
+                        args = {k: v for k, v in fc.args.items()} if hasattr(fc.args, "items") else dict(fc.args)
+                        try:
+                            mcp_result = await session.call_tool(fc.name, arguments=args)
+                            result_text = "\\n".join(c.text for c in mcp_result.content if c.type == "text")
+                        except Exception as e:
+                            logger.error("MCP Tool '%s' failed: %s", fc.name, e)
+                            result_text = f"Error: {e}"
+                            
+                        # Feed the tool response back into Gemini
+                        # Using dict mapping instead of Part and FunctionResponse imported types
+                        response = chat.send_message(
+                            {"function_response": {"name": fc.name, "response": {"result": result_text[:10000]}}}
+                        )
+                    
+                    final_text = response.text if hasattr(response, "text") else getattr(
+                        response.candidates[0].content.parts[0], "text", "No context gathered."
+                    )
+                    if trace:
+                        langfuse_service.log_generation(
+                            trace,
+                            name="gemini-mcp-gather",
+                            model=config.GEMINI_MODEL,
+                            input_messages=[{"role": "user", "content": prompt}],
+                            output=final_text
+                        )
+                    return final_text
+        except Exception as e:
+            logger.error("Failed async MCP gather: %s", e, exc_info=True)
+            if trace:
+                trace.update(level="ERROR", statusMessage=str(e))
+            return ""
 
     def _call(self, user_prompt: str, session_id: str = None) -> TerraformBundle:
-        from app.services import langfuse_service
         full_input = f"System Prompt:\\n{self._SYSTEM}\\n\\nUser Prompt:\\n{user_prompt}"
         trace = langfuse_service.create_trace(
             name="terraform-gen",
@@ -307,7 +457,6 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
         return TerraformBundle(**data)
 
     def _generate_workflow(self, session_id: str = None) -> str:
-        from app.services import langfuse_service
         trace = langfuse_service.create_trace(
             name="cicd-gen",
             session_id=session_id,

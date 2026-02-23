@@ -1,0 +1,27 @@
+# Dockerfile.mcp
+# This defines the MCP (Model Context Protocol) server for Terraform Registry data.
+# 
+# Build command:
+#   docker build -t local/terraform-mcp-server -f Dockerfile.mcp .
+#
+# Note: The FastAPI application orchestrates this image by spawning it
+# as a subprocess via `docker run -i` to communicate over stdin/stdout.
+
+FROM hashicorp/terraform-mcp-server:latest
+
+# -----------------------------------------------------------------------------
+# Optional Customizations:
+# -----------------------------------------------------------------------------
+
+# Switch to root if you need to install OS-level dependencies or certificates
+# USER root
+
+# Example: Adding custom CA certificates (useful behind corporate proxies)
+# COPY my-custom-ca.crt /usr/local/share/ca-certificates/
+# RUN update-ca-certificates
+
+# Switch back to the non-root user for security (if defined in base image)
+# USER 1000
+
+# The base image already defines the ENTRYPOINT.
+# To use the registry tools, the app passes: --toolsets=registry

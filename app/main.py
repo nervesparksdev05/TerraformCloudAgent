@@ -95,6 +95,14 @@ def _rate_id(user: Optional[Dict], x_user_id: Optional[str]) -> str:
     return x_user_id or "anonymous"
 
 
+def _get_run_or_404(run_id: str):
+    """DRY helper: fetch a run or raise 404."""
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return run
+
+
 def _build_agent_request(terraform_params: dict) -> AgentRequest:
     return AgentRequest(
         request=terraform_params,
@@ -346,18 +354,16 @@ async def get_conversation(
 
 
 @app.get("/conversations")
-async def list_conversations(limit: int = 20, x_user_id: Optional[str] = Header(None)):
-    await check_rate_limit(x_user_id or "anonymous", redis_client)
+async def list_conversations(
+    limit: int = 20,
+    user: Optional[Dict] = Depends(get_current_user),
+    x_user_id: Optional[str] = Header(None),
+):
+    await check_rate_limit(_rate_id(user, x_user_id), redis_client)
     return conversation_manager.list_sessions(limit=limit)
 
 
-@app.get("/sessions")
-async def list_sessions(limit: int = 20, user: Optional[Dict] = Depends(get_current_user)):
-    try:
-        return conversation_manager.list_sessions(limit=limit)
-    except Exception as e:
-        logger.error("list_sessions failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+# /sessions is removed — was a duplicate of /conversations
 
 
 @app.delete("/sessions/{session_id}")
@@ -414,10 +420,7 @@ async def create_run(
 
 @app.get("/runs/{run_id}", response_model=RunResponse)
 async def get_run(run_id: str):
-    run = run_manager.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    return run
+    return _get_run_or_404(run_id)
 
 
 @app.post("/runs/{run_id}/chat", response_model=ChatResponse)
@@ -426,9 +429,7 @@ async def chat_about_run(
     chat_request: ChatRequest,
     x_user_id: Optional[str] = Header(None),
 ):
-    run = run_manager.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    run = _get_run_or_404(run_id)
     if run.status not in [RunStatus.PLANNED, RunStatus.REVIEWING]:
         raise HTTPException(status_code=400, detail=f"Chat not available in status: {run.status}")
 
@@ -457,9 +458,7 @@ async def edit_run(
     background_tasks: BackgroundTasks,
     x_user_id: Optional[str] = Header(None),
 ):
-    run = run_manager.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    run = _get_run_or_404(run_id)
     if run.status not in [RunStatus.PLANNED, RunStatus.REVIEWING]:
         raise HTTPException(status_code=400, detail=f"Cannot edit run in status: {run.status}")
 
@@ -474,9 +473,7 @@ async def edit_run(
 
 @app.get("/runs/{run_id}/files")
 async def get_run_files(run_id: str):
-    run = run_manager.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    run = _get_run_or_404(run_id)
     try:
         workspace = run_manager.get_workspace_path(run_id)
         files = {}
@@ -492,9 +489,7 @@ async def get_run_files(run_id: str):
 
 @app.post("/runs/{run_id}/files", response_model=RunResponse)
 async def edit_run_files(run_id: str, files: dict, background_tasks: BackgroundTasks):
-    run = run_manager.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    run = _get_run_or_404(run_id)
     if run.status not in [RunStatus.PLANNED, RunStatus.REVIEWING]:
         raise HTTPException(status_code=400, detail=f"Cannot edit files in status: {run.status}")
     if "main_tf" not in files:
@@ -512,9 +507,7 @@ async def edit_run_files(run_id: str, files: dict, background_tasks: BackgroundT
 
 @app.post("/runs/{run_id}/approve", response_model=RunResponse)
 async def approve_run(run_id: str, background_tasks: BackgroundTasks):
-    run = run_manager.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    run = _get_run_or_404(run_id)
     if run.status not in [RunStatus.PLANNED, RunStatus.REVIEWING]:
         raise HTTPException(status_code=400, detail=f"Cannot approve run in status: {run.status}")
 
@@ -526,9 +519,7 @@ async def approve_run(run_id: str, background_tasks: BackgroundTasks):
 
 @app.post("/runs/{run_id}/reject", response_model=RunResponse)
 async def reject_run(run_id: str):
-    run = run_manager.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    run = _get_run_or_404(run_id)
     if run.status in [RunStatus.COMPLETED, RunStatus.FAILED]:
         raise HTTPException(status_code=400, detail=f"Cannot reject run in status: {run.status}")
 
@@ -539,9 +530,7 @@ async def reject_run(run_id: str):
 
 @app.post("/runs/{run_id}/destroy", response_model=RunResponse)
 async def destroy_run(run_id: str, background_tasks: BackgroundTasks):
-    run = run_manager.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    run = _get_run_or_404(run_id)
     if run.status != RunStatus.COMPLETED:
         raise HTTPException(status_code=400, detail="Can only destroy COMPLETED runs.")
 

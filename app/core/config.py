@@ -90,9 +90,8 @@ LOGS_DIR = BASE_DIR / os.getenv("LOGS_DIR", "logs")
 # === Terraform ===
 TERRAFORM_TIMEOUT = int(os.getenv("TERRAFORM_TIMEOUT", "300"))
 
-# === AWS MCP Configuration ===
-AWS_MCP_SERVER = os.getenv("AWS_MCP_SERVER", "awslabs-core-mcp-server")
-ENABLE_AWS_MCP = os.getenv("ENABLE_AWS_MCP", "False").lower() == "true"
+# === Terraform MCP Configuration ===
+ENABLE_TERRAFORM_MCP = os.getenv("ENABLE_TERRAFORM_MCP", "True").lower() == "true"
 
 # === Security ===
 # Security validation is now handled in security_checker.py with provider-specific rules
