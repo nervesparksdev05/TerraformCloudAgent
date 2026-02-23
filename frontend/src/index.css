@@ -1,0 +1,202 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg-primary: #0a0e27;
+    --bg-secondary: #151932;
+    --bg-card: #1a1f3a;
+    --text-primary: #f0f4f8;
+    --text-secondary: #b8c5d6;
+    --text-muted: #6b7a90;
+    --border-color: rgba(255, 255, 255, 0.05);
+    --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    --success-color: #10b981;
+    --error-color: #ef4444;
+    --warning-color: #f59e0b;
+    --sidebar-width: 320px;
+    --header-height: 64px;
+  }
+
+  body {
+    @apply bg-[#0a0e27] text-[#f0f4f8] overflow-hidden;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  }
+}
+
+@layer components {
+  .app-container {
+    @apply flex h-screen overflow-hidden;
+  }
+
+  .sidebar {
+    @apply flex flex-col p-6 overflow-y-auto bg-[#151932] border-r border-white/5;
+    width: var(--sidebar-width);
+  }
+
+  .main-content {
+    @apply flex-1 flex flex-col overflow-hidden bg-[#0a0e27];
+  }
+
+  .card {
+    @apply bg-[#1a1f3a] border border-white/5 rounded-2xl p-6;
+  }
+
+  .btn {
+    @apply inline-flex items-center gap-2 px-6 py-3 rounded-xl font-semibold text-sm transition-all duration-200 border-none cursor-pointer;
+  }
+
+  .btn-primary {
+    @apply text-white;
+    background: var(--primary-gradient);
+  }
+
+  .btn-primary:hover {
+    @apply -translate-y-0.5 shadow-lg;
+    box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+  }
+
+  .btn-secondary {
+    @apply bg-[#1a1f3a] text-[#f0f4f8] border border-white/5;
+  }
+
+  .btn-secondary:hover {
+    @apply bg-white/5;
+  }
+
+  .message {
+    @apply px-5 py-4 rounded-2xl max-w-[80%] leading-relaxed;
+  }
+
+  .message-user {
+    @apply text-white;
+    background: var(--primary-gradient);
+  }
+
+  .message-bot {
+    @apply bg-[#1a1f3a] border border-white/5 text-[#f0f4f8];
+  }
+
+  /* Markdown content styling within bot messages */
+  .message-bot p:first-child {
+    margin-top: 0;
+  }
+
+  .message-bot p:last-child {
+    margin-bottom: 0;
+  }
+
+  .message-bot code {
+    @apply bg-black/20 px-1.5 py-0.5 rounded text-sm;
+    font-family: 'Fira Code', 'Courier New', monospace;
+  }
+
+  .message-bot pre {
+    @apply bg-black/30 rounded-lg p-3 overflow-x-auto my-2;
+    font-family: 'Fira Code', 'Courier New', monospace;
+  }
+
+  .message-bot pre code {
+    @apply bg-transparent px-0 py-0;
+  }
+
+  .message-bot ul,
+  .message-bot ol {
+    @apply my-2 pl-5;
+  }
+
+  .message-bot li {
+    @apply my-1;
+  }
+
+  .message-bot a {
+    @apply text-purple-400 hover:text-purple-300 underline;
+  }
+
+  .message-bot strong {
+    @apply font-semibold text-white;
+  }
+
+  .message-bot em {
+    @apply italic text-gray-300;
+  }
+
+  .message-bot blockquote {
+    @apply border-l-4 border-purple-500 pl-4 py-1 my-2 italic text-gray-300;
+  }
+
+  .message-bot h1,
+  .message-bot h2,
+  .message-bot h3 {
+    @apply font-semibold text-white mt-3 mb-2;
+  }
+
+  .message-bot h1 {
+    @apply text-xl;
+  }
+
+  .message-bot h2 {
+    @apply text-lg;
+  }
+
+  .message-bot h3 {
+    @apply text-base;
+  }
+
+  .message-bot table {
+    @apply w-full border-collapse my-2;
+  }
+
+  .message-bot th,
+  .message-bot td {
+    @apply border border-white/10 px-3 py-2 text-left;
+  }
+
+  .message-bot th {
+    @apply bg-white/5 font-semibold;
+  }
+
+  .message.streaming {
+    @apply relative;
+  }
+
+  .code-block {
+    @apply bg-[#151932] border border-white/5 rounded-xl p-4 overflow-x-auto text-sm text-[#b8c5d6];
+    font-family: 'Fira Code', monospace;
+  }
+}
+
+@layer utilities {
+  .animate-fade-in {
+    animation: fadeIn 0.3s ease-in-out;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+
+    to {
+      opacity: 1;
+    }
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
