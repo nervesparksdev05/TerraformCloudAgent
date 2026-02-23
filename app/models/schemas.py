@@ -13,7 +13,6 @@ class RunStatus(str, Enum):
     CREATED = "created"
     PLANNING = "planning"
     PLANNED = "planned"
-    COST_ESTIMATED = "cost_estimated"
     REVIEWING = "reviewing"
     APPROVED = "approved"
     APPLYING = "applying"
@@ -80,7 +79,7 @@ class RunResponse(BaseModel):
 
     # Optional fields populated as run progresses
     plan_output: Optional[str] = Field(None, description="Terraform plan output")
-    cost_estimate: Optional[Dict[str, Any]] = Field(None, description="Cost estimation details")
+    topology_diagram: Optional[str] = Field(None, description="Architecture diagram (Mermaid syntax)")
 
     outputs: Optional[Dict[str, Any]] = Field(
         None,
@@ -89,6 +88,11 @@ class RunResponse(BaseModel):
     error: Optional[str] = Field(
         None,
         description="Error message (only present on failure)"
+    )
+
+    self_healer_diagnosis: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Autonomous diagnostic result for deployment failures"
     )
 
     metadata: Optional[Dict[str, Any]] = Field(
@@ -109,7 +113,6 @@ class RunResponse(BaseModel):
                 "status": "planned",
                 "provider": "aws",
                 "log_path": "runs/run_20260207_203000_abc123",
-                "cost_estimate": {"total_monthly_cost": "25.50", "currency": "USD"},
                 "outputs": None
             }
         }

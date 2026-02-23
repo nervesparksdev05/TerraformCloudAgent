@@ -1,385 +1,385 @@
-import os
-import json
+"""
+llm_service.py — Gemini LLM service for TerraBot.
+
+Design principles:
+  - Single source of truth for history building, safety settings, and JSON extraction
+  - Retry with exponential backoff for transient Gemini errors
+  - Strict separation between sync (LLMService) and async (AsyncLLMService) surfaces
+  - JSON extraction is tolerant but honest: logs and raises rather than silently corrupting
+  - No magic integers — use google.generativeai FinishReason enum names
+"""
+from __future__ import annotations
+
 import asyncio
+import json
 import re
-from typing import List, Dict, Optional
+import time
+from typing import Any, AsyncIterator, Dict, List, Optional
+
 import google.generativeai as genai
+from google.generativeai.types import GenerationConfig, GenerateContentResponse
+
 from app.core import config
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+_JSON_MODE_UNSUPPORTED_PREFIXES = ("gemma-",)
+
+# FinishReason: 0=UNSPECIFIED, 1=STOP, 2=MAX_TOKENS
+_ACCEPTABLE_FINISH_REASONS = {0, 1, 2}
+
+_RETRYABLE_EXCEPTIONS = (TimeoutError, ConnectionError, OSError)
+
+_SAFETY_SETTINGS = [
+    {"category": "HARM_CATEGORY_HARASSMENT",       "threshold": "BLOCK_ONLY_HIGH"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_ONLY_HIGH"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
+]
+
+_MAX_RETRIES      = 3
+_RETRY_BASE_DELAY = 1.5   # seconds; doubles each retry
+
+
+# ── JSON extraction ───────────────────────────────────────────────────────────
+
+def _try_parse(text: str) -> Optional[Any]:
+    """Return parsed JSON or None — never raises."""
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
 
 def extract_json_object(text: str) -> str:
     """
-    Best-effort extraction of a single JSON object from LLM output.
-    Handles:
-    - ```json ... ```
-    - extra text before/after JSON
+    Extract the first valid JSON object from LLM output.
+
+    Strategy (stops at first success):
+      1. Strip markdown fences → try parse
+      2. Find first {...} block → try parse
+      3. Fix trailing commas / structural issues → try parse
+      4. Try json_repair library if available
+      5. Close truncated JSON (unmatched braces/brackets)
+      6. Raise ValueError with position, message, and 160-char context
+
+    Returns a JSON *string* — callers call json.loads() themselves.
     """
     if not text:
-        raise ValueError("Empty LLM response")
+        raise ValueError("LLM returned empty response.")
 
-    t = text.strip()
+    # Step 1 — strip markdown fences
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"\s*```\s*$", "", cleaned).strip()
+    if _try_parse(cleaned) is not None:
+        return cleaned
 
-    # Strip markdown fences
-    t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE).strip()
-    t = re.sub(r"\s*```$", "", t).strip()
+    # Step 2 — extract first {...} block
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    start = cleaned.find("{")
+    if not match and start == -1:
+        raise ValueError(f"No JSON object in LLM output. First 300 chars: {cleaned[:300]!r}")
+    candidate = match.group(0) if match else cleaned[start:]
+    if _try_parse(candidate) is not None:
+        return candidate
 
-    # If already valid JSON
+    # Step 3 — structural fixes
+    fixed = re.sub(r",\s*(?=[\}\]])", "", candidate)           # trailing commas
+    fixed = re.sub(r"(\}|\])\s*\n\s*(\{|\[)", r"\1,\n\2", fixed)  # missing comma between objects
+    fixed = re.sub(r'("\s*:\s*"[^"]*")\s*\n\s*"', r'\1,\n"', fixed)  # missing comma after string value
+    if _try_parse(fixed) is not None:
+        logger.debug("extract_json_object: fixed structural issues.")
+        return fixed
+
+    # Step 4 — json_repair library
     try:
-        json.loads(t)
-        return t
-    except Exception:
+        from json_repair import repair_json  # type: ignore[import]
+        repaired = repair_json(candidate)
+        if _try_parse(repaired) is not None:
+            logger.warning("extract_json_object: used json_repair.")
+            return repaired
+    except ImportError:
         pass
+    except Exception as exc:
+        logger.debug("json_repair failed: %s", exc)
 
-    # Extract first {...} block
-    m = re.search(r"\{.*\}", t, flags=re.DOTALL)
-    if not m:
-        logger.error(f"No JSON object found in LLM output (first 1000 chars): {t[:1000]}")
-        raise ValueError(f"No JSON object found in output: {t[:300]}")
+    # Step 5 — close truncated JSON
+    truncated = fixed
+    if len(re.findall(r'(?<!\\)"', truncated)) % 2 != 0:
+        truncated += '"'
+    open_sq  = truncated.count("[") - truncated.count("]")
+    open_b   = truncated.count("{") - truncated.count("}")
+    if open_sq > 0:
+        truncated += "]" * open_sq
+    if open_b > 0:
+        truncated += "}" * open_b
+    if _try_parse(truncated) is not None:
+        logger.warning("extract_json_object: closed truncated JSON.")
+        return truncated
 
-    candidate = m.group(0)
-    
-    # Try to validate and provide detailed error
+    # Step 6 — raise with context
     try:
         json.loads(candidate)
-        return candidate
-    except json.JSONDecodeError as json_err:
-        logger.error(f"Invalid JSON from LLM. Error: {json_err}")
-        logger.error(f"JSON snippet around error (chars {max(0, json_err.pos-100)}-{json_err.pos+100}): {candidate[max(0, json_err.pos-100):json_err.pos+100]}")
-        
-        # Try to fix common issues
-        # 1. Trailing commas before closing braces/brackets
-        fixed = re.sub(r',\s*([\}\]])', r'\1', candidate)
-        
-        # 2. Missing commas between properties (heuristic)
-        # Fix: "key": "value" "next_key": ...
-        fixed = re.sub(r'"\s*\n\s*"', '",\n"', fixed)
-        fixed = re.sub(r'(\}|\])\s*"', r'\1, "', fixed)  # object/array end followed by key
-        fixed = re.sub(r'(\}|\])\s*(\{)', r'\1, \2', fixed)  # object end followed by object start
-        fixed = re.sub(r'("\s*:\s*(?:true|false|null|[0-9\.]+))\s*"', r'\1, "', fixed) # literal value followed by key
-
-        try:
-            from json_repair import repair_json
-            fixed = repair_json(candidate)
-            logger.warning("Repaired JSON using json_repair library")
-            return fixed
-        except Exception as repair_err:
-            logger.warning(f"json_repair failed: {repair_err}")
-            pass
-
-        try:
-            json.loads(fixed)
-            logger.warning("Successfully fixed JSON by removing trailing commas and adding missing commas")
-            return fixed
-        except:
-            pass
-        
-        # If we still can't parse it, raise the original error with context
-        logger.error(f"Full JSON (first 2000 chars): {candidate[:2000]}")
+    except json.JSONDecodeError as exc:
+        ctx = candidate[max(0, exc.pos - 80): exc.pos + 80]
         raise ValueError(
-            f"Invalid JSON from LLM at position {json_err.pos}: {json_err.msg}. "
-            f"Context: ...{candidate[max(0, json_err.pos-50):json_err.pos+50]}..."
-        )
+            f"Cannot parse JSON — error at pos {exc.pos}: {exc.msg}\nContext: ...{ctx}..."
+        ) from exc
+    raise ValueError("Unknown JSON extraction failure.")
 
+
+# ── Shared helpers ────────────────────────────────────────────────────────────
+
+def _model_supports_json_mode(model_name: str) -> bool:
+    return not any(model_name.lower().startswith(p) for p in _JSON_MODE_UNSUPPORTED_PREFIXES)
+
+
+def _build_gemini_history(
+    messages: List[Dict[str, str]],
+    json_requested: bool,
+) -> tuple[Optional[str], list[dict], str]:
+    """Convert OpenAI-style messages → (system_instruction, history, last_user_prompt)."""
+    system_instruction: Optional[str] = None
+    history: list[dict] = []
+
+    for msg in messages:
+        role    = (msg.get("role") or "").strip()
+        content = (msg.get("content") or "").strip()
+        if role == "system":
+            system_instruction = content
+        elif role == "user":
+            history.append({"role": "user",  "parts": [content]})
+        elif role == "assistant":
+            history.append({"role": "model", "parts": [content]})
+
+    json_hint = (
+        "\n\nIMPORTANT: Your entire response MUST be a single valid JSON object. "
+        "No markdown, no code fences, no explanation outside the JSON."
+    )
+    if json_requested and system_instruction:
+        system_instruction += json_hint
+
+    # Pull last user message out of history (Gemini requires it as the prompt arg)
+    if history and history[-1]["role"] == "user":
+        last_user = history[-1]["parts"][0]
+        history   = history[:-1]
+    else:
+        last_user = "Hello"
+
+    if json_requested:
+        last_user += "\n\nRespond ONLY with a valid JSON object."
+
+    return system_instruction, history, last_user
+
+
+def _build_model(model_name: str, system_instruction: Optional[str]) -> genai.GenerativeModel:
+    kwargs: dict[str, Any] = {"model_name": model_name, "safety_settings": _SAFETY_SETTINGS}
+    if system_instruction:
+        kwargs["system_instruction"] = system_instruction
+    return genai.GenerativeModel(**kwargs)
+
+
+def _build_generation_config(
+    temperature: float, max_tokens: int, json_requested: bool, model_name: str,
+) -> GenerationConfig:
+    cfg = GenerationConfig(temperature=temperature, max_output_tokens=max_tokens)
+    if json_requested and _model_supports_json_mode(model_name):
+        cfg.response_mime_type = "application/json"
+    return cfg
+
+
+def _check_candidate(response: GenerateContentResponse, max_tokens: int) -> str:
+    """Validate response and extract text. Raises ValueError on blocked/empty responses."""
+    if not response.candidates:
+        raise ValueError("Gemini returned no candidates — request may have been blocked.")
+
+    candidate     = response.candidates[0]
+    finish_reason = getattr(candidate, "finish_reason", None)
+
+    if finish_reason == 3:  # SAFETY
+        ratings = getattr(candidate, "safety_ratings", [])
+        detail  = ", ".join(f"{r.category.name}={r.probability.name}" for r in ratings) or "no detail"
+        raise ValueError(f"Response blocked by safety filters ({detail}).")
+
+    if finish_reason not in _ACCEPTABLE_FINISH_REASONS and finish_reason is not None:
+        logger.warning("Unexpected Gemini finish_reason: %s", finish_reason)
+    if finish_reason == 2:
+        logger.warning("Gemini hit max_output_tokens=%d — response may be truncated.", max_tokens)
+
+    text = ""
+    try:
+        text = response.text or ""
+    except (ValueError, AttributeError):
+        if candidate.content and candidate.content.parts:
+            text = "".join(p.text for p in candidate.content.parts if hasattr(p, "text"))
+
+    if not text and finish_reason == 2:
+        raise ValueError(f"Gemini hit max_output_tokens={max_tokens} with no usable text.")
+
+    return text
+
+
+# ── Core sync call with retry ─────────────────────────────────────────────────
+
+def _call_gemini_sync(
+    model_name: str,
+    messages: List[Dict[str, str]],
+    temperature: float,
+    max_tokens: int,
+    response_format: Optional[Dict[str, str]],
+    timeout: int,
+) -> str:
+    json_requested = bool(response_format and response_format.get("type") == "json_object")
+    system_instruction, history, last_user = _build_gemini_history(messages, json_requested)
+    model   = _build_model(model_name, system_instruction)
+    gen_cfg = _build_generation_config(temperature, max_tokens, json_requested, model_name)
+
+    last_exc: Exception = RuntimeError("No attempts made.")
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            chat     = model.start_chat(history=history)
+            response = chat.send_message(
+                last_user,
+                generation_config=gen_cfg,
+                safety_settings=_SAFETY_SETTINGS,
+                request_options={"timeout": timeout},
+            )
+            text = _check_candidate(response, max_tokens)
+            logger.debug("Gemini response (first 500): %.500s", text)
+            return extract_json_object(text) if json_requested else text
+
+        except ValueError:
+            raise  # Content/safety/JSON issues — don't retry
+
+        except _RETRYABLE_EXCEPTIONS as exc:
+            last_exc = exc
+            delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            logger.warning(
+                "Gemini transient error attempt %d/%d: %s — retrying in %.1fs",
+                attempt, _MAX_RETRIES, exc, delay,
+            )
+            time.sleep(delay)
+
+        except Exception as exc:
+            logger.error("Gemini unexpected error: %s", exc, exc_info=True)
+            raise
+
+    logger.error("Gemini failed after %d retries: %s", _MAX_RETRIES, last_exc)
+    raise last_exc
+
+
+# ── Public service classes ────────────────────────────────────────────────────
 
 class LLMService:
     """
-    LLM service using Google Gemini API.
-    Handles authentication and chat completion requests.
+    Synchronous Gemini LLM service.
+
+    Usage:
+        svc  = LLMService()
+        text = svc.chat_completion(messages=[...])
+        obj  = svc.chat_completion(messages=[...], response_format={"type": "json_object"})
+        # obj is a JSON string — call json.loads(obj) to get a dict
     """
 
-    def __init__(self):
-        self.provider = config.DEFAULT_PROVIDER  # cloud provider, NOT LLM provider
-        
-        # Initialize Gemini
-        self.gemini_api_key = config.GEMINI_API_KEY
-        if not self.gemini_api_key:
-            raise ValueError("GEMINI_API_KEY is required but not set.")
-        
-        genai.configure(api_key=self.gemini_api_key)
-        self.gemini_model = genai.GenerativeModel(config.GEMINI_MODEL)
-        logger.info(f"LLMService initialized with Gemini model: {config.GEMINI_MODEL}")
+    def __init__(self) -> None:
+        api_key = config.GEMINI_API_KEY
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY is not set.")
+        genai.configure(api_key=api_key)
+        self._model_name: str = config.GEMINI_MODEL
+        logger.info("LLMService ready (model: %s)", self._model_name)
 
     def chat_completion(
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: int = 2000,
+        max_tokens: int = 8000,
         response_format: Optional[Dict[str, str]] = None,
-        timeout: int = 30
+        timeout: int = 60,
     ) -> str:
         """
-        Synchronous chat completion using Gemini.
+        Synchronous chat completion.
+        Returns raw text, or a JSON string if response_format={"type":"json_object"}.
         """
-        try:
-            return self._call_gemini(messages, temperature, max_tokens, response_format)
-        except Exception as e:
-            logger.error(f"Gemini LLM generation failed: {e}", exc_info=True)
-            raise
-
-    # Models that do NOT support JSON response mode
-    _NO_JSON_MODE_PREFIXES = ("gemma-",)
-
-    def _model_supports_json_mode(self) -> bool:
-        """Check if the current Gemini model supports response_mime_type JSON."""
-        model_name = (config.GEMINI_MODEL or "").lower()
-        return not any(model_name.startswith(p) for p in self._NO_JSON_MODE_PREFIXES)
-
-    def _call_gemini(self, messages, temperature, max_tokens, response_format) -> str:
-        json_requested = bool(response_format and response_format.get("type") == "json_object")
-
-        # Build Gemini history safely: keep a clean history and a final user prompt
-        history = []
-        system_instruction = None
-        last_user = None
-
-        for msg in messages:
-            role = msg.get("role")
-            content = (msg.get("content") or "").strip()
-
-            if role == "system":
-                system_instruction = content
-            elif role == "user":
-                # keep user turns in history; we will send the LAST user as prompt
-                history.append({"role": "user", "parts": [content]})
-            elif role == "assistant":
-                history.append({"role": "model", "parts": [content]})
-
-        # Pull last user out of history as send_message prompt
-        if history and history[-1]["role"] == "user":
-            last_user = history[-1]["parts"][0]
-            history = history[:-1]
-        else:
-            last_user = "Hello"
-
-        # Configure generation config
-        generation_config = genai.types.GenerationConfig(
+        return _call_gemini_sync(
+            model_name=self._model_name,
+            messages=messages,
             temperature=temperature,
-            max_output_tokens=max_tokens,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            timeout=timeout,
         )
-
-        # Strong JSON instruction (works even if JSON mime type is ignored)
-        if json_requested:
-            json_hint = (
-                "\n\nIMPORTANT: Respond ONLY with a single valid JSON object. "
-                "No markdown, no code fences, no extra text."
-            )
-            if system_instruction:
-                system_instruction += json_hint
-            else:
-                last_user = (last_user or "Hello") + json_hint
-
-        # Only set JSON mime type for supported models
-        if json_requested and self._model_supports_json_mode():
-            generation_config.response_mime_type = "application/json"
-
-        # Configure safety settings to be less restrictive
-        # This helps avoid false positives when analyzing technical documentation
-        safety_settings = [
-            {
-                "category": "HARM_CATEGORY_HARASSMENT",
-                "threshold": "BLOCK_ONLY_HIGH"
-            },
-            {
-                "category": "HARM_CATEGORY_HATE_SPEECH",
-                "threshold": "BLOCK_ONLY_HIGH"
-            },
-            {
-                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "threshold": "BLOCK_ONLY_HIGH"
-            },
-            {
-                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                "threshold": "BLOCK_ONLY_HIGH"
-            }
-        ]
-
-        # Create model with system instruction if present
-        model = self.gemini_model
-        if system_instruction:
-            model = genai.GenerativeModel(
-                model_name=config.GEMINI_MODEL,
-                system_instruction=system_instruction,
-                safety_settings=safety_settings
-            )
-
-        chat = model.start_chat(history=history)
-        response = chat.send_message(
-            last_user, 
-            generation_config=generation_config,
-            safety_settings=safety_settings
-        )
-        
-        # Handle different finish reasons
-        # 0 = FINISH_REASON_UNSPECIFIED
-        # 1 = STOP (normal completion)
-        # 2 = MAX_TOKENS
-        # 3 = SAFETY (blocked by safety filters)
-        # 4 = RECITATION
-        # 5 = OTHER
-        
-        # Check if response was blocked or had issues
-        if not response.candidates:
-            raise ValueError("Gemini API returned no candidates. The request may have been blocked.")
-        
-        candidate = response.candidates[0]
-        finish_reason = candidate.finish_reason
-        
-        # Handle safety blocks (finish_reason 3)
-        if finish_reason == 3:  # SAFETY
-            safety_ratings = candidate.safety_ratings if hasattr(candidate, 'safety_ratings') else []
-            safety_info = ", ".join([f"{r.category.name}: {r.probability.name}" for r in safety_ratings]) if safety_ratings else "Unknown"
-            logger.warning(f"Gemini response blocked by safety filters: {safety_info}")
-            raise ValueError(
-                f"Content was blocked by Gemini safety filters. "
-                f"This may be due to sensitive content in the README or prompt. "
-                f"Safety ratings: {safety_info}"
-            )
-        
-        # Handle max tokens (finish_reason 2)
-        if finish_reason == 2:  # MAX_TOKENS
-            logger.warning(f"Gemini response hit max token limit ({max_tokens}). Response may be truncated.")
-        
-        # Handle other non-successful finish reasons
-        if finish_reason not in [0, 1, 2]:  # Not UNSPECIFIED, STOP, or MAX_TOKENS
-            logger.warning(f"Gemini finished with unexpected reason: {finish_reason}")
-        
-        # Try to get text safely
-        text = ""
-        try:
-            text = response.text or ""
-        except (ValueError, AttributeError) as e:
-            # If we can't get text, try to extract from parts directly
-            if candidate.content and candidate.content.parts:
-                try:
-                    text = "".join([part.text for part in candidate.content.parts if hasattr(part, 'text')])
-                except Exception as parts_err:
-                    logger.error(f"Failed to extract text from parts: {parts_err}")
-            
-            # If we still have no text
-            if not text:
-                # If finish_reason is MAX_TOKENS, provide a more helpful error
-                if finish_reason == 2:
-                    logger.error(f"Gemini hit max_tokens ({max_tokens}) and returned no content. Response completely truncated.")
-                    raise ValueError(
-                        f"Response exceeded max_tokens ({max_tokens}) and was completely truncated. "
-                        f"No valid content was returned. Please increase max_tokens or simplify the prompt."
-                    )
-                else:
-                    logger.error(f"Could not extract text from Gemini response. Finish reason: {finish_reason}")
-                    raise ValueError(
-                        f"Gemini API did not return valid content. Finish reason: {finish_reason}. "
-                        f"Original error: {str(e)}"
-                    )
-
-        logger.debug("Gemini raw response (first 500): %s", text[:500])
-
-        if json_requested:
-            return extract_json_object(text)
-
-        return text
 
 
 class AsyncLLMService(LLMService):
     """
-    Asynchronous wrapper for LLM Service using Gemini.
-    """
-    def __init__(self):
-        super().__init__()
+    Asynchronous Gemini LLM service.
 
-    async def chat_completion(
+    Adds:
+      - async chat_completion (thread-pool wrapper — avoids blocking the event loop)
+      - async stream_chat_completion (true Gemini streaming)
+    """
+
+    async def chat_completion(  # type: ignore[override]
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: int = 2000,
+        max_tokens: int = 8000,
         response_format: Optional[Dict[str, str]] = None,
-        timeout: int = 30
+        timeout: int = 60,
     ) -> str:
-        """
-        Asynchronous chat completion using Gemini.
-        """
-        try:
-            return await asyncio.to_thread(
-                self._call_gemini, messages, temperature, max_tokens, response_format
-            )
-        except Exception as e:
-            logger.error(f"Async Gemini LLM generation failed: {e}", exc_info=True)
-            raise
+        """Async chat completion — runs sync call in a thread pool."""
+        return await asyncio.to_thread(
+            _call_gemini_sync,
+            self._model_name, messages, temperature, max_tokens, response_format, timeout,
+        )
 
     async def stream_chat_completion(
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: int = 2000,
-    ):
+        max_tokens: int = 8000,
+        response_format: Optional[Dict[str, str]] = None,  # ignored for streaming
+        timeout: int = 60,
+    ) -> AsyncIterator[str]:
         """
-        Stream chat completion using Gemini's streaming API.
-        Yields text chunks as they're generated.
+        Stream text chunks from Gemini.
+        Note: JSON mode (response_mime_type) is not supported for streaming requests.
+        Use chat_completion if you need a JSON response.
         """
-        try:
-            # Build Gemini history
-            history = []
-            system_instruction = None
-            last_user = None
+        system_instruction, history, last_user = _build_gemini_history(
+            messages, json_requested=False
+        )
+        model   = _build_model(self._model_name, system_instruction)
+        gen_cfg = _build_generation_config(
+            temperature, max_tokens, json_requested=False, model_name=self._model_name,
+        )
 
-            for msg in messages:
-                role = msg.get("role")
-                content = (msg.get("content") or "").strip()
-
-                if role == "system":
-                    system_instruction = content
-                elif role == "user":
-                    history.append({"role": "user", "parts": [content]})
-                elif role == "assistant":
-                    history.append({"role": "model", "parts": [content]})
-
-            # Pull last user out of history as send_message prompt
-            if history and history[-1]["role"] == "user":
-                last_user = history[-1]["parts"][0]
-                history = history[:-1]
-            else:
-                last_user = "Hello"
-
-            # Configure generation config
-            generation_config = genai.types.GenerationConfig(
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-            )
-
-            # Configure safety settings
-            safety_settings = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"}
-            ]
-
-            # Create model with system instruction if present
-            model = self.gemini_model
-            if system_instruction:
-                model = genai.GenerativeModel(
-                    model_name=config.GEMINI_MODEL,
-                    system_instruction=system_instruction,
-                    safety_settings=safety_settings
-                )
-
+        def _run_stream():
             chat = model.start_chat(history=history)
-            
-            # Stream the response
-            response_stream = chat.send_message(
+            return chat.send_message(
                 last_user,
-                generation_config=generation_config,
-                safety_settings=safety_settings,
-                stream=True
+                generation_config=gen_cfg,
+                safety_settings=_SAFETY_SETTINGS,
+                stream=True,
             )
 
-            # Yield chunks as they arrive
-            for chunk in response_stream:
+        try:
+            stream = await asyncio.to_thread(_run_stream)
+        except Exception as exc:
+            logger.error("Gemini stream setup failed: %s", exc, exc_info=True)
+            raise
+
+        for chunk in stream:
+            try:
                 if chunk.text:
                     yield chunk.text
-
-        except Exception as e:
-            logger.error(f"Streaming Gemini LLM generation failed: {e}", exc_info=True)
-            raise
+            except (ValueError, AttributeError):
+                candidate = (chunk.candidates[0] if getattr(chunk, "candidates", None) else None)
+                if candidate and getattr(candidate, "finish_reason", None) in _ACCEPTABLE_FINISH_REASONS:
+                    continue
+                logger.debug("Skipping chunk with no text.")

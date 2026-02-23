@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { ChatPanel } from '../components/features/chat';
-import { CodeEditor } from '../components/features/chat';
+import { ChatPanel, CodeEditor } from '../components/features/chat';
+import { InsightsPanel, SelfHealerAlert } from '../components/features/insights';
 import { Card, Button, Badge } from '../components/common';
 import {
   Play,
@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { api } from '../services/api';
 
-const FILE_KEYS = ['main_tf', 'variables_tf', 'outputs_tf'];
+const FILE_KEYS = ['main_tf', 'variables_tf', 'outputs_tf', 'github_workflow_yaml'];
 
 export const WorkspacePage = ({
   sessionId,
@@ -143,6 +143,17 @@ export const WorkspacePage = ({
                 >
                   Lifecycle
                 </button>
+                <button
+                  className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                    activeTab === 'insights'
+                      ? 'bg-primary-gradient text-white'
+                      : 'text-gray-500 hover:text-gray-300'
+                  }`}
+                  onClick={() => onTabChange('insights')}
+                  style={activeTab === 'insights' ? { background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' } : {}}
+                >
+                  Insights
+                </button>
               </>
             )}
           </div>
@@ -236,7 +247,7 @@ export const WorkspacePage = ({
                   {FILE_KEYS.map((key) => (
                     <CodeEditor
                       key={key}
-                      fileName={key.replace('_', '.')}
+                      fileName={key === 'github_workflow_yaml' ? '.github/workflows/deploy.yml' : key.replace('_', '.')}
                       content={files[key]}
                       onChange={canEdit ? (val) => handleFileChange(key, val) : undefined}
                     />
@@ -280,72 +291,157 @@ export const WorkspacePage = ({
         )}
 
         {activeTab === 'manage' && (
-          <div className="flex-1 p-8 overflow-y-auto">
-            <div className="grid grid-cols-2 gap-8">
-              <Card className="space-y-6">
-                <h3 className="flex items-center gap-2 text-lg font-semibold">
-                  <LayoutDashboard size={20} /> Operations
+          <div className="flex-1 p-8 overflow-y-auto space-y-6">
+
+            {/* ── Self-Healer alert ── */}
+            {runData?.self_healer_diagnosis && (
+              <SelfHealerAlert diagnosis={runData.self_healer_diagnosis} />
+            )}
+
+            {/* ── Error banner ── */}
+            {runData?.error && (
+              <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm space-y-1">
+                <div className="font-semibold flex items-center gap-2">
+                  <AlertCircle size={16} /> Deployment Error
+                </div>
+                <p className="text-xs text-red-300/80 font-mono whitespace-pre-wrap">{runData.error}</p>
+              </div>
+            )}
+
+            {/* ── Destructive resources warning ── */}
+            {runData?.metadata?.destructive_resources?.length > 0 && (
+              <div className="p-4 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-yellow-300 text-sm space-y-2">
+                <div className="font-semibold flex items-center gap-2">
+                  <AlertCircle size={16} />
+                  ⚠️ {runData.metadata.destructive_resources.length} Destructive Operation(s) Detected
+                </div>
+                <ul className="text-xs font-mono space-y-1 pl-2">
+                  {runData.metadata.destructive_resources.map((r, i) => (
+                    <li key={i} className="text-yellow-200/70">• {r}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* ── Deployment Outputs (post-apply) ── */}
+            {runData?.outputs && Object.keys(runData.outputs).length > 0 && (
+              <Card className="space-y-4">
+                <h3 className="flex items-center gap-2 text-base font-semibold text-green-400">
+                  <Play size={16} className="text-green-400" /> Deployment Outputs
                 </h3>
-                <div className="space-y-4">
+                <div className="divide-y divide-white/5">
+                  {Object.entries(runData.outputs).map(([key, val]) => {
+                    const display = typeof val === 'object' ? JSON.stringify(val?.value ?? val, null, 2) : String(val);
+                    const isUrl = display.startsWith('http') || display.startsWith('ssh ');
+                    return (
+                      <div key={key} className="py-3 flex justify-between items-start gap-4">
+                        <span className="text-xs text-gray-400 font-mono min-w-[160px]">{key}</span>
+                        {isUrl ? (
+                          <a
+                            href={display.startsWith('http') ? display : undefined}
+                            target="_blank" rel="noreferrer"
+                            className="text-xs font-mono text-indigo-400 hover:underline break-all text-right"
+                          >{display}</a>
+                        ) : (
+                          <span className="text-xs font-mono text-gray-200 break-all text-right">{display}</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </Card>
+            )}
+
+            <div className="grid grid-cols-2 gap-6">
+              {/* ── Operations ── */}
+              <Card className="space-y-4">
+                <h3 className="flex items-center gap-2 text-base font-semibold">
+                  <LayoutDashboard size={18} /> Operations
+                </h3>
+                <div className="space-y-3">
                   <Button
-                    variant="primary"
-                    className="w-full py-4"
+                    variant="primary" className="w-full py-4"
                     onClick={() => handleAction(api.approveRun, runId, 'Deployment Approved')}
                     disabled={['applying', 'applied', 'completed'].includes(runData?.status)}
                     icon={Play}
-                  >
-                    Approve &amp; Deploy Stack
-                  </Button>
+                  >Approve &amp; Deploy Stack</Button>
                   <Button
-                    variant="warning"
-                    className="w-full py-4"
+                    variant="warning" className="w-full py-4"
                     onClick={() => handleAction(api.sendForApproval, runId, 'Approval Email Sent')}
                     icon={Mail}
-                  >
-                    Request Remote Approval
-                  </Button>
-                  <div className="grid grid-cols-2 gap-4">
-                    <Button
-                      variant="danger"
-                      size="md"
+                  >Request Remote Approval</Button>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Button variant="danger" size="md"
                       onClick={() => handleAction(api.rejectRun, runId, 'Plan Rejected')}
                       icon={AlertCircle}
-                    >
-                      Reject Plan
-                    </Button>
-                    <Button
-                      variant="danger"
-                      size="md"
+                    >Reject Plan</Button>
+                    <Button variant="danger" size="md"
                       onClick={() => handleAction(api.destroyRun, runId, 'Destroying Stack')}
                       icon={Trash}
-                    >
-                      Destroy
-                    </Button>
+                    >Destroy</Button>
                   </div>
                 </div>
               </Card>
 
-              <div className="space-y-8">
-                <Card>
-                  <h4 className="text-gray-400 text-xs uppercase tracking-widest mb-4">
-                    Environment Context
-                  </h4>
-                  <div className="space-y-3">
-                    {Object.entries(collectedParams).map(([key, value]) => (
-                      <div
-                        key={key}
-                        className="flex justify-between items-center py-2 border-b border-white/5"
-                      >
-                        <span className="text-xs text-gray-500 capitalize">
-                          {key.replace('_', ' ')}
-                        </span>
-                        <span className="text-xs font-semibold">{String(value)}</span>
-                      </div>
-                    ))}
+              {/* ── Run metadata ── */}
+              <Card className="space-y-3">
+                <h4 className="text-gray-400 text-xs uppercase tracking-widest">Run Info</h4>
+                {[
+                  ['Run ID',    runData?.run_id],
+                  ['Status',    runData?.status],
+                  ['Provider',  runData?.provider],
+                  ['Created',   runData?.created_at ? new Date(runData.created_at).toLocaleString() : '—'],
+                  ['Updated',   runData?.updated_at ? new Date(runData.updated_at).toLocaleString() : '—'],
+                ].map(([label, value]) => value && (
+                  <div key={label} className="flex justify-between items-center py-1.5 border-b border-white/5">
+                    <span className="text-xs text-gray-500">{label}</span>
+                    <span className="text-xs font-mono text-gray-200 truncate max-w-[55%] text-right">{value}</span>
                   </div>
-                </Card>
-              </div>
+                ))}
+              </Card>
             </div>
+
+            {/* ── Collected Configuration ── */}
+            <Card className="space-y-4">
+              <h3 className="text-base font-semibold text-gray-200">📋 Deployment Configuration</h3>
+              <p className="text-xs text-gray-500">All parameters collected during the conversation and used to generate the Terraform files.</p>
+              <div className="divide-y divide-white/5 max-h-96 overflow-y-auto">
+                {Object.entries(collectedParams)
+                  .filter(([, v]) => v !== null && v !== '' && v !== undefined)
+                  .map(([key, value]) => {
+                    const display = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+                    const isLong  = display.length > 80;
+                    return (
+                      <div key={key} className={`py-2.5 ${isLong ? 'flex flex-col gap-1' : 'flex justify-between items-center'}`}>
+                        <span className="text-xs text-gray-400 font-mono capitalize min-w-[180px]">
+                          {key.replace(/_/g, ' ')}
+                        </span>
+                        <span className={`text-xs font-mono text-gray-200 ${isLong ? 'pl-2 text-gray-400 whitespace-pre-wrap break-all' : 'text-right truncate max-w-[60%]'}`}>
+                          {display}
+                        </span>
+                      </div>
+                    );
+                  })}
+              </div>
+            </Card>
+
+          </div>
+        )}
+
+        {activeTab === 'insights' && (
+          <div className="flex-1 flex overflow-hidden">
+            {!runData || runData.status === 'planning' ? (
+              <div className="flex-1 flex items-center justify-center">
+                <div className="text-center space-y-4">
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-500 mx-auto" />
+                  <p className="text-gray-400">Generating Architecture Insights...</p>
+                </div>
+              </div>
+            ) : (
+              <InsightsPanel
+                topologyDiagram={runData?.topology_diagram}
+              />
+            )}
           </div>
         )}
       </div>

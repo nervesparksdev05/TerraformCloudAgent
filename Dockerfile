@@ -8,9 +8,16 @@ ENV PYTHONUNBUFFERED 1
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies + Terraform CLI (direct binary, works on all Debian versions)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
+    curl unzip ca-certificates \
+    && TERRAFORM_VERSION="1.7.5" \
+    && curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
+    -o /tmp/terraform.zip \
+    && unzip /tmp/terraform.zip -d /usr/local/bin/ \
+    && rm /tmp/terraform.zip \
+    && chmod +x /usr/local/bin/terraform \
+    && terraform version \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
@@ -23,5 +30,9 @@ COPY . .
 # Expose port
 EXPOSE 8000
 
-# Start Gunicorn
-CMD ["gunicorn", "-c", "gunicorn.conf.py", "app.main:app"]
+CMD ["gunicorn", "app.main:app", \
+    "-w", "8", \
+    "-k", "uvicorn.workers.UvicornWorker", \
+    "-b", "0.0.0.0:8000", \
+    "--timeout", "300", \
+    "--keep-alive", "5"]

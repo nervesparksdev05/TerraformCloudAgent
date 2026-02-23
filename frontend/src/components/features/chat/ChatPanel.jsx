@@ -32,30 +32,32 @@ export const ChatPanel = ({
         <div ref={chatEndRef} />
       </div>
 
-      {isComplete && !runId ? (
-        <Card className="border-green-500/30 mb-4 animate-fade-in flex items-center justify-between">
-          <div>
-            <h4 className="flex items-center gap-2 text-green-500">
-              <CheckCircle size={18} /> Requirements Captured
-            </h4>
-            <p className="text-sm text-gray-400 mt-1">
-              Provider: {collectedParams.cloud_provider?.toUpperCase()}. Ready to build your
-              cluster.
-            </p>
-          </div>
-          <Button variant="primary" onClick={onGenerateTerraform} icon={Terminal}>
-            Generate Infrastructure
-          </Button>
-        </Card>
-      ) : (
-        !isComplete && (
-          <ChatInput
-            value={inputMessage}
-            onChange={(e) => onInputChange(e.target.value)}
-            onSend={() => onSendMessage(inputMessage)}
-            placeholder="Reply to the agent..."
-          />
-        )
+      {isComplete && !runId && (
+        <div className="mb-4 animate-fade-in space-y-4">
+          <Card className="border-green-500/30 flex items-center justify-between">
+            <div>
+              <h4 className="flex items-center gap-2 text-green-500">
+                <CheckCircle size={18} /> Requirements Captured
+              </h4>
+              <p className="text-sm text-gray-400 mt-1">
+                Provider: {collectedParams.cloud_provider?.toUpperCase()}. Ready to build your
+                cluster.
+              </p>
+            </div>
+            <Button variant="primary" onClick={onGenerateTerraform} icon={Terminal}>
+              Generate Infrastructure
+            </Button>
+          </Card>
+        </div>
+      )}
+      
+      {!isComplete && (
+        <ChatInput
+          value={inputMessage}
+          onChange={(e) => onInputChange(e.target.value)}
+          onSend={() => onSendMessage(inputMessage)}
+          placeholder="Reply to the agent..."
+        />
       )}
     </div>
   );
