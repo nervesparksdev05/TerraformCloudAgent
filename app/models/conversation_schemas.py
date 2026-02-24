@@ -23,6 +23,7 @@ class ConversationSession(BaseModel):
     is_complete: bool = Field(default=False)
     status: ConversationStatus = Field(default=ConversationStatus.ACTIVE)
     run_ids: List[str] = Field(default_factory=list, description="List of run IDs generated from this session")
+    last_trace_id: Optional[str] = Field(None, description="Langfuse trace ID from the last LLM call, used to link feedback")
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 

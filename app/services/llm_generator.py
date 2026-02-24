@@ -6,14 +6,11 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Dict
-
-from app.services import langfuse_service
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List
 
+from app.services import langfuse_service
 from app.services.llm_service import LLMService, AsyncLLMService
+from app.services.mcp_service import mcp_manager, ValidationResult
 from app.core import config
 from app.core.logger import get_logger
 from app.models.schemas import TerraformBundle
@@ -21,13 +18,6 @@ from app.models.schemas import TerraformBundle
 logger = get_logger(__name__)
 
 
-@dataclass
-class ValidationResult:
-    """Result from MCP-based Terraform registry validation."""
-    ok: bool = True
-    notes: List[str] = field(default_factory=list)
-    # Live registry data collected during validation — passed to auto-fix LLM call
-    registry_context: Dict[str, Any] = field(default_factory=dict)
 
 
 class LLMGenerator:
@@ -105,8 +95,16 @@ RULES:
         user_prompt = self._build_prompt(params)
         session_id = params.get("session_id", "unknown_mcp_session")
 
+        # Top-level trace for the entire TF generation pipeline
+        pipeline_trace = langfuse_service.create_trace(
+            name="Terraform Pipeline",
+            session_id=session_id,
+            input={"params": {k: v for k, v in params.items() if k != "readme_context"},
+                   "prompt_length": len(user_prompt)},
+        )
+
 # 1. Gather MCP context (async version)
-        mcp_context = await self._gather_mcp_context_async(user_prompt, session_id)
+        mcp_context = await mcp_manager.gather_registry_context(user_prompt, session_id)
 
         if mcp_context:
             user_prompt += (
@@ -122,7 +120,22 @@ RULES:
         bundle.github_workflow_yaml = self._generate_workflow(session_id=session_id)
 
         # 4. Post-process async
-        return await self._post_process_async(bundle)
+        result = await self._post_process_async(bundle)
+
+        # Record final TF files on the pipeline trace
+        if pipeline_trace:
+            try:
+                pipeline_trace.update(output={
+                    "main_tf": result.main_tf[:5000],
+                    "variables_tf": result.variables_tf[:3000],
+                    "outputs_tf": result.outputs_tf[:2000],
+                    "has_workflow": bool(result.github_workflow_yaml),
+                    "validation_notes": getattr(result, 'validation_notes', None),
+                })
+            except Exception:
+                pass
+
+        return result
 
     async def refine_terraform(
         self,
@@ -149,32 +162,67 @@ RULES:
             '"suggested_fix": str, "confidence": float}'
         )
         user = f"ERROR:\n{error_msg}\n\nTERRAFORM CODE:\n{json.dumps(terraform_code, indent=2)}"
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+        trace = langfuse_service.create_trace(
+            name="Diagnose Error",
+            input=messages,
+        )
+
         try:
             raw = await self.llm_service.chat_completion(
-                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                messages=messages,
                 temperature=0.1, response_format={"type": "json_object"},
+                _trace=trace,
             )
+            if trace:
+                try:
+                    trace.update(output=raw[:10000])
+                except Exception:
+                    pass
             return json.loads(raw)
         except Exception as e:
             logger.error("diagnose_error failed: %s", e)
-            return {
+            fallback = {
                 "diagnosis": "Failed to analyze error.",
                 "action_type": "manual_action",
                 "suggested_fix": "Check AWS IAM permissions and security group rules.",
                 "confidence": 0.0,
             }
+            if trace:
+                try:
+                    trace.update(output=json.dumps(fallback), level="ERROR", status_message=str(e))
+                except Exception:
+                    pass
+            return fallback
 
     async def chat_about_plan(self, context: str) -> str:
-        return await self.llm_service.chat_completion(
-            messages=[
-                {"role": "system", "content": (
-                    "You are a helpful AWS Terraform expert. Answer questions about Terraform plans "
-                    "concisely using AWS-native terminology."
-                )},
-                {"role": "user", "content": context},
-            ],
-            temperature=0.3, max_tokens=2000,
+        messages = [
+            {"role": "system", "content": (
+                "You are a helpful AWS Terraform expert. Answer questions about Terraform plans "
+                "concisely using AWS-native terminology."
+            )},
+            {"role": "user", "content": context},
+        ]
+
+        trace = langfuse_service.create_trace(
+            name="Chat About Plan",
+            input=messages,
         )
+
+        result = await self.llm_service.chat_completion(
+            messages=messages,
+            temperature=0.3, max_tokens=2000,
+            _trace=trace,
+        )
+
+        if trace:
+            try:
+                trace.update(output=result[:10000])
+            except Exception:
+                pass
+
+        return result
 
     # ── Prompt builder ─────────────────────────────────────────────────────────
 
@@ -188,7 +236,7 @@ RULES:
         instance_count = int(p.get("instance_count", 1) or 1)
         storage_gb     = p.get("storage_size_gb", 8) or 8
         storage_type   = p.get("storage_type") or "gp2"
-
+        os_image       = p.get("os_image") or "ubuntu-jammy-22.04"
         has_db     = p.get("has_database", False)
         db_type    = p.get("database_type", "none")
         db_hosting = p.get("database_hosting_model", "managed_cloud")
@@ -326,158 +374,75 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
 """
 
     # ── Internals ──────────────────────────────────────────────────────────────
-    
-    def _gather_mcp_context_sync(self, prompt: str, session_id: str = None) -> str:
-        if not config.ENABLE_TERRAFORM_MCP:
-            return ""
-        try:
-            # If we're already inside a running event loop (FastAPI background task),
-            # use asyncio.get_event_loop().run_until_complete() via run_in_executor
-            # to avoid the RuntimeError from asyncio.run() nesting.
-            try:
-                loop = asyncio.get_running_loop()
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(asyncio.run, self._gather_mcp_context_async(prompt, session_id))
-                    return future.result(timeout=120)
-            except RuntimeError:
-                # No running loop — safe to call asyncio.run() directly
-                return asyncio.run(self._gather_mcp_context_async(prompt, session_id))
-        except Exception as e:
-            logger.error("Failed to gather MCP context: %s", e)
-            return ""
 
-    async def _gather_mcp_context_async(self, prompt: str, session_id: str = None) -> str:
-        try:
-            from mcp import ClientSession, StdioServerParameters
-            from mcp.client.stdio import stdio_client
-            import google.generativeai as genai
-            from google.generativeai.types import Tool, FunctionDeclaration
-        except ImportError as e:
-            logger.warning("mcp package missing, skipping MCP context generation: %s", e)
-            return ""
+    def _generate_workflow(self, session_id: str = None) -> str:
+        """
+        Generate a GitHub Actions CI/CD workflow (deploy.yml)
+        for deploying Terraform to AWS.
+        """
+        return """name: Deploy Infrastructure
 
-        # Create trace for context gathering
-        trace = langfuse_service.create_trace(
-            name="mcp-context-gather",
-            session_id=session_id,
-            input=prompt
-        )
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
-        server_params = StdioServerParameters(
-            command="docker",
-            args=["run", "-i", "--rm", "hashicorp/terraform-mcp-server", "--toolsets=registry"],
-        )
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
 
-        try:
-            async with stdio_client(server_params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    tools_response = await session.list_tools()
-                    
-                    def _sanitize_schema(schema: dict) -> dict:
-                        """Recursively remove unsupported validation keys from JSON schema for Gemini compatibility."""
-                        # Gemini only supports basic OpenAPI schema. Drop extended JSON schema keywords.
-                        drop_keys = {"default", "minimum", "maximum", "minLength", "maxLength", "pattern", "additionalProperties"}
-                        cleaned = {}
-                        for k, v in schema.items():
-                            if k in drop_keys:
-                                continue
-                            if isinstance(v, dict):
-                                cleaned[k] = _sanitize_schema(v)
-                            elif isinstance(v, list) and k not in ("required", "enum"):
-                                cleaned[k] = [_sanitize_schema(i) if isinstance(i, dict) else i for i in v]
-                            else:
-                                cleaned[k] = v
-                        # Gemini requires `type: object` for the root
-                        if schema.get("type") == "object" and "properties" not in cleaned:
-                            cleaned["properties"] = {}
-                        return cleaned
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-                    genai_tools = []
-                    for t in tools_response.tools:
-                        genai_tools.append(
-                            Tool(
-                                function_declarations=[
-                                    FunctionDeclaration(
-                                        name=t.name,
-                                        description=t.description,
-                                        parameters=_sanitize_schema(t.inputSchema)
-                                    )
-                                ]
-                            )
-                        )
-                    
-                    gather_system = (
-                        "You are an AI context-gathering agent. Read the user's infrastructure request. "
-                        "Determine if you need to look up documentation from the Terraform Registry "
-                        "(like 'get_provider_details' or 'search_modules') to understand complex properties or syntaxes. "
-                        "Use your tools to query the registry. Once you have enough context, reply with a focused "
-                        "technical summary of the module versions and resource arguments needed to write the code. "
-                        "CRITICAL: Explicitly ignore and filter out any deprecated arguments or properties from your summary. "
-                        "Do NOT generate the actual `.tf` code. ONLY summarize the registry data for the coder."
-                    )
-                    
-                    model = genai.GenerativeModel(
-                        model_name=config.GEMINI_MODEL,
-                        system_instruction=gather_system,
-                        tools=genai_tools
-                    )
-                    chat = model.start_chat()
-                    response = chat.send_message(prompt)
-                    
-                    # Intercept up to 5 tool calls
-                    for _ in range(5):
-                        if not response.candidates:
-                            break
-                        part = response.candidates[0].content.parts[0]
-                        if not getattr(part, "function_call", None):
-                            break  # Native text response
-                        
-                        fc = part.function_call
-                        logger.info("MCP Tool called: %s", fc.name)
-                        
-                        args = {k: v for k, v in fc.args.items()} if hasattr(fc.args, "items") else dict(fc.args)
-                        try:
-                            mcp_result = await session.call_tool(fc.name, arguments=args)
-                            result_text = "\\n".join(c.text for c in mcp_result.content if c.type == "text")
-                        except Exception as e:
-                            logger.error("MCP Tool '%s' failed: %s", fc.name, e)
-                            result_text = f"Error: {e}"
-                            
-                        # Feed the tool response back into Gemini
-                        # Using dict mapping instead of Part and FunctionResponse imported types
-                        response = chat.send_message(
-                            {"function_response": {"name": fc.name, "response": {"result": result_text[:10000]}}}
-                        )
-                    
-                    final_text = response.text if hasattr(response, "text") else getattr(
-                        response.candidates[0].content.parts[0], "text", "No context gathered."
-                    )
-                    if trace:
-                        langfuse_service.log_generation(
-                            trace,
-                            name="gemini-mcp-gather",
-                            model=config.GEMINI_MODEL,
-                            input_messages=[{"role": "user", "content": prompt}],
-                            output=final_text
-                        )
-                    return final_text
-        except Exception as e:
-            logger.error("Failed async MCP gather: %s", e, exc_info=True)
-            if trace:
-                trace.update(level="ERROR", statusMessage=str(e))
-            return ""
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main'
+        run: terraform apply -auto-approve tfplan
+"""
 
     async def _call(self, user_prompt: str, session_id: str = None) -> TerraformBundle:
+        messages = [
+            {"role": "system", "content": self._SYSTEM},
+            {"role": "user",   "content": user_prompt},
+        ]
+
+        trace = langfuse_service.create_trace(
+            name="Terraform Generation",
+            session_id=session_id,
+            input=messages,
+        )
+
         raw = await self.llm_service.chat_completion(
-            messages=[
-                {"role": "system", "content": self._SYSTEM},
-                {"role": "user",   "content": user_prompt},
-            ],
+            messages=messages,
             temperature=0.1, max_tokens=8192,
             response_format={"type": "json_object"}, timeout=120,
+            _trace=trace,
         )
+
+        if trace:
+            try:
+                trace.update(output=raw[:10000])
+            except Exception:
+                pass
+
         data = json.loads(raw)
         for key in ("main_tf", "variables_tf", "outputs_tf"):
             val = data.get(key, "")
@@ -652,114 +617,9 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
     async def validate_with_mcp(self, bundle: TerraformBundle) -> ValidationResult:
         """
         Post-generation validation using the Terraform MCP registry.
+        Delegates to mcp_manager.validate_terraform().
         """
-        if not config.ENABLE_TERRAFORM_MCP:
-            logger.debug("validate_with_mcp: ENABLE_TERRAFORM_MCP=False — skipping.")
-            return ValidationResult(ok=True, notes=["MCP validation skipped (disabled)."])
-
-        notes: List[str] = []
-        ok = True
-        registry_context: Dict[str, Any] = {}
-
-        try:
-            from app.services.mcp_service import mcp_manager
-
-            tools = await mcp_manager.list_tools("terraform", config.TERRAFORM_MCP_SERVER)
-            if not tools:
-                logger.warning("validate_with_mcp: No MCP tools available — skipping registry check.")
-                return ValidationResult(ok=True, notes=["MCP validation skipped (no tools available)."])
-
-            tool_names = {t["name"] for t in tools}
-            logger.info("validate_with_mcp: %d MCP tools available", len(tools))
-
-            # ── Check 1: Latest provider version ──────────────────────────────
-            if "get_latest_provider_version" in tool_names:
-                try:
-                    result = await asyncio.wait_for(
-                        mcp_manager.call_tool_by_name(
-                            "get_latest_provider_version",
-                            {"namespace": "hashicorp", "name": "aws"},
-                        ),
-                        timeout=15.0,
-                    )
-                    version_info = str(result.content) if result else ""
-                    registry_context["aws_provider_version"] = version_info
-                    notes.append(f"Registry: hashicorp/aws provider — {version_info[:120]}")
-                    logger.info("validate_with_mcp: provider version check OK")
-                except asyncio.TimeoutError:
-                    logger.warning("validate_with_mcp: provider version check timed out")
-                    notes.append("Registry: provider version check timed out.")
-                except Exception as e:
-                    logger.warning("validate_with_mcp: provider version check failed: %s", e)
-                    notes.append(f"Registry: provider version check failed ({e}).")
-
-            # ── Check 2: Verify resource types + collect registry docs ─────────
-            if bundle.main_tf:
-                import re
-                resource_types = list(set(re.findall(r'resource\s+"(aws_[\w]+)"', bundle.main_tf)))
-                resource_docs: Dict[str, str] = {}
-
-                for rtype in resource_types[:8]:
-                    if "search_providers" in tool_names:
-                        try:
-                            search_result = await asyncio.wait_for(
-                                mcp_manager.call_tool_by_name(
-                                    "search_providers",
-                                    {
-                                        "provider_name": "aws",
-                                        "provider_namespace": "hashicorp",
-                                        "service_slug": rtype,
-                                        "provider_document_type": "resources",
-                                    },
-                                ),
-                                timeout=15.0,
-                            )
-                            if search_result and search_result.content:
-                                raw_search = str(search_result.content)
-                                doc_id_match = re.search(r'"provider_doc_id"\s*:\s*"?(\d+)"?', raw_search)
-                                if doc_id_match and "get_provider_details" in tool_names:
-                                    doc_id = doc_id_match.group(1)
-                                    try:
-                                        detail_result = await asyncio.wait_for(
-                                            mcp_manager.call_tool_by_name(
-                                                "get_provider_details",
-                                                {"provider_doc_id": doc_id},
-                                            ),
-                                            timeout=15.0,
-                                        )
-                                        if detail_result and detail_result.content:
-                                            resource_docs[rtype] = str(detail_result.content)[:3000]
-                                            notes.append(f"Registry: ✅ {rtype} — docs fetched.")
-                                        else:
-                                            resource_docs[rtype] = raw_search[:1000]
-                                            notes.append(f"Registry: ✅ {rtype} — found in registry.")
-                                    except Exception:
-                                        resource_docs[rtype] = raw_search[:1000]
-                                        notes.append(f"Registry: ✅ {rtype} — found (detail fetch failed).")
-                                else:
-                                    resource_docs[rtype] = raw_search[:1000]
-                                    notes.append(f"Registry: ✅ {rtype} — found in registry.")
-                                logger.info("validate_with_mcp: %s → found", rtype)
-                            else:
-                                notes.append(f"Registry: ⚠️  {rtype} — not found (may need renaming).")
-                                ok = False
-                                logger.warning("validate_with_mcp: %s → NOT FOUND", rtype)
-                        except asyncio.TimeoutError:
-                            logger.warning("validate_with_mcp: search timed out for %s", rtype)
-                            notes.append(f"Registry: {rtype} — check timed out.")
-                        except Exception as e:
-                            logger.warning("validate_with_mcp: search failed for %s: %s", rtype, e)
-                            notes.append(f"Registry: {rtype} — search error ({e}).")
-
-                if resource_docs:
-                    registry_context["resource_docs"] = resource_docs
-
-        except Exception as e:
-            logger.error("validate_with_mcp: unexpected error: %s", e, exc_info=True)
-            notes.append(f"MCP validation error: {e}")
-            ok = True  # Non-blocking
-
-        return ValidationResult(ok=ok, notes=notes, registry_context=registry_context)
+        return await mcp_manager.validate_terraform(bundle.main_tf)
 
     def _post_process(self, bundle: TerraformBundle) -> TerraformBundle:
         """Run terraform fmt + validate if CLI is available."""
@@ -851,17 +711,24 @@ Instructions:
 
 Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."}}
 """
+        messages = [
+            {"role": "system", "content": self._SYSTEM},
+            {"role": "user",   "content": fix_prompt},
+        ]
+
+        trace = langfuse_service.create_trace(
+            name="Terraform Auto-Fix",
+            input=messages,
+        )
 
         try:
             raw = await self.llm_service.chat_completion(
-                messages=[
-                    {"role": "system", "content": self._SYSTEM},
-                    {"role": "user",   "content": fix_prompt},
-                ],
+                messages=messages,
                 temperature=0.05,
                 max_tokens=8192,
                 response_format={"type": "json_object"},
                 timeout=120,
+                _trace=trace,
             )
             data = json.loads(raw)
             for key in ("main_tf", "variables_tf", "outputs_tf"):
@@ -874,11 +741,27 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
                 outputs_tf=data.get("outputs_tf") or bundle.outputs_tf,
                 github_workflow_yaml=bundle.github_workflow_yaml,
             )
+
+            if trace:
+                try:
+                    trace.update(output={
+                        "main_tf": fixed.main_tf[:5000],
+                        "variables_tf": fixed.variables_tf[:3000],
+                        "outputs_tf": fixed.outputs_tf[:2000],
+                    })
+                except Exception:
+                    pass
+
             logger.info("_auto_fix_with_mcp: auto-fix applied successfully.")
             return fixed
 
         except Exception as e:
             logger.error("_auto_fix_with_mcp: LLM fix failed (%s) — using original bundle.", e)
+            if trace:
+                try:
+                    trace.update(output={"error": str(e)}, level="ERROR")
+                except Exception:
+                    pass
             return bundle
 
     async def _post_process_async(self, bundle: TerraformBundle) -> TerraformBundle:

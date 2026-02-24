@@ -245,6 +245,13 @@ def _call_gemini_sync(
     timeout: int,
     _trace: Optional[Any] = None,
 ) -> str:
+    # Auto-create a Langfuse trace if caller didn't provide one
+    if not _trace:
+        _trace = langfuse_service.create_trace(
+            name="llm-call",
+            input=messages,
+        )
+
     json_requested = bool(response_format and response_format.get("type") == "json_object")
     system_instruction, history, last_user = _build_gemini_history(messages, json_requested)
     model = _build_model(model_name, system_instruction)
@@ -286,6 +293,10 @@ def _call_gemini_sync(
                     usage=usage,
                     start_time=t0,
                 )
+                try:
+                    _trace.update(output=result[:10000])
+                except Exception:
+                    pass
 
             return result
 
@@ -386,27 +397,9 @@ class AsyncLLMService(LLMService):
         from app.services.mcp_service import mcp_manager
 
         requested_servers = use_mcp if isinstance(use_mcp, list) else ["terraform", "aws"]
-        all_mcp_tools = []
+        gemini_tools = await mcp_manager.get_gemini_tools(requested_servers)
 
-        fetch_tasks = []
-        if "terraform" in requested_servers and config.ENABLE_TERRAFORM_MCP:
-            fetch_tasks.append(
-                mcp_manager.list_tools("terraform", config.TERRAFORM_MCP_SERVER)
-            )
-        if "aws" in requested_servers and config.ENABLE_AWS_MCP:
-            fetch_tasks.append(
-                mcp_manager.list_tools("aws", config.AWS_MCP_SERVER)
-            )
-
-        if fetch_tasks:
-            results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-            for res in results:
-                if isinstance(res, list):
-                    all_mcp_tools.extend(res)
-                else:
-                    logger.error("Error fetching MCP tools: %s", res)
-
-        if not all_mcp_tools:
+        if not gemini_tools:
             return await asyncio.to_thread(
                 _call_gemini_sync,
                 self._model_name,
@@ -417,17 +410,6 @@ class AsyncLLMService(LLMService):
                 timeout,
                 _trace,
             )
-
-        gemini_tools = [{
-            "function_declarations": [
-                {
-                    "name": t["name"],
-                    "description": t["description"],
-                    "parameters": t["input_schema"],
-                }
-                for t in all_mcp_tools
-            ]
-        }]
 
         json_requested = bool(response_format and response_format.get("type") == "json_object")
         system_instruction, history, last_user = _build_gemini_history(messages, json_requested)
@@ -464,34 +446,7 @@ class AsyncLLMService(LLMService):
             if not tool_calls:
                 break
 
-            tool_responses = []
-
-            for tc in tool_calls:
-                try:
-                    mcp_res = await asyncio.wait_for(
-                        mcp_manager.call_tool_by_name(tc.name, tc.args),
-                        timeout=10.0,
-                    )
-                    tool_responses.append({
-                        "function_response": {
-                            "name": tc.name,
-                            "response": {"result": str(mcp_res.content)},
-                        }
-                    })
-                except asyncio.TimeoutError:
-                    tool_responses.append({
-                        "function_response": {
-                            "name": tc.name,
-                            "response": {"error": "Tool timed out after 10s"},
-                        }
-                    })
-                except Exception as e:
-                    tool_responses.append({
-                        "function_response": {
-                            "name": tc.name,
-                            "response": {"error": str(e)},
-                        }
-                    })
+            tool_responses = await mcp_manager.execute_tool_calls(tool_calls)
 
             response = await asyncio.to_thread(
                 chat.send_message,
@@ -502,7 +457,40 @@ class AsyncLLMService(LLMService):
             )
 
         text = _check_candidate(response, max_tokens)
-        return extract_json_object(text) if json_requested else text
+        result = extract_json_object(text) if json_requested else text
+
+        # Log to Langfuse (MCP path)
+        # Auto-create a trace if caller didn't provide one
+        if not _trace:
+            _trace = langfuse_service.create_trace(
+                name="llm-call-mcp",
+                input=messages,
+            )
+        if _trace:
+            usage_metadata = getattr(response, "usage_metadata", None)
+            usage = None
+            if usage_metadata:
+                usage = {
+                    "input": getattr(usage_metadata, "prompt_token_count", 0),
+                    "output": getattr(usage_metadata, "candidates_token_count", 0),
+                    "total": getattr(usage_metadata, "total_token_count", 0),
+                    "unit": "TOKENS",
+                }
+            langfuse_service.log_generation(
+                _trace,
+                name="gemini-chat-mcp",
+                model=self._model_name,
+                input_messages=messages,
+                output=result[:10000],
+                usage=usage,
+                start_time=time.time(),
+            )
+            try:
+                _trace.update(output=result[:10000])
+            except Exception:
+                pass
+
+        return result
 
     async def stream_chat_completion(
         self,

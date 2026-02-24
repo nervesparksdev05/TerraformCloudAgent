@@ -183,6 +183,28 @@ class WorkflowEngine:
             if not feedback:
                 self.workspace_manager.write_request_json(workspace_path, request)
 
+            # ── Log full TF files + params to Langfuse ────────────────────
+            try:
+                from app.services import langfuse_service
+                session_id = params.get("session_id") if isinstance(params, dict) else None
+                tf_trace = langfuse_service.create_trace(
+                    name="Generated Terraform Files",
+                    session_id=session_id,
+                    input={
+                        "run_id": run_id,
+                        "is_refinement": bool(feedback),
+                        "params_keys": list(params.keys()) if isinstance(params, dict) else [],
+                    },
+                    output={
+                        "main_tf": bundle.main_tf,
+                        "variables_tf": bundle.variables_tf,
+                        "outputs_tf": bundle.outputs_tf,
+                        "github_workflow_yaml": bundle.github_workflow_yaml or "",
+                    },
+                )
+            except Exception as e:
+                logger.debug("Langfuse TF file logging failed (non-blocking): %s", e)
+
             # Skip terraform plan to avoid credential requirements (multi-cloud support)
             # Files are generated and ready for review immediately
             logger.info("[%s] Terraform files generated, skipping plan validation", run_id)

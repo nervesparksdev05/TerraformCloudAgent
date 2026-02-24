@@ -408,7 +408,7 @@ class ConversationManager:
         if self.sessions_collection is None:
             raise RuntimeError("MongoDB not available.")
 
-        sid = f"sess_{datetime.now():%Y%m%d_%H%M%S}_{secrets.token_hex(4)}"
+        sid = f"terrf_{datetime.now():%Y%m%d_%H%M%S}_{secrets.token_hex(4)}"
 
         if not owner.strip() or not repo.strip():
             return {
@@ -629,10 +629,6 @@ class ConversationManager:
     # ── LLM call ──────────────────────────────────────────────────────────────
 
     async def _call_llm(self, session: ConversationSession) -> str:
-        trace = langfuse_service.create_trace(
-            name="Conversation Turn",
-            session_id=session.session_id,
-        )
         readme_ctx = str(session.collected_parameters.get("readme_context", ""))[:3500]
         snapshot   = json.dumps(session.collected_parameters, indent=2)
         env        = str(session.collected_parameters.get("environment", "") or "NOT SET").upper()
@@ -660,11 +656,31 @@ class ConversationManager:
             if m["role"] in ("user", "assistant"):
                 messages.append({"role": m["role"], "content": m["content"]})
 
-        return await self.llm_service.chat_completion(
+        # Create Langfuse trace with full input (system prompt + chat history)
+        trace = langfuse_service.create_trace(
+            name="Conversation Turn",
+            session_id=session.session_id,
+            input=messages,
+        )
+
+        # Store trace ID on session so feedback can link to it
+        if trace:
+            session.last_trace_id = getattr(trace, 'id', None)
+
+        result = await self.llm_service.chat_completion(
             messages=messages, temperature=0.5, max_tokens=16000,
             response_format={"type": "json_object"}, timeout=120,
             _trace=trace
         )
+
+        # Update trace with the LLM output
+        if trace:
+            try:
+                trace.update(output=result[:10000])
+            except Exception:
+                pass
+
+        return result
 
     def _svc_hints(self, session: ConversationSession) -> str:
         cp      = session.collected_parameters
@@ -818,16 +834,29 @@ class ConversationManager:
     # ── README analysis ────────────────────────────────────────────────────────
 
     async def _analyze_readme(self, readme: str) -> Dict[str, Any]:
+        readme_input = [{"role": "user", "content": _README_PROMPT + readme[:18000]}]
+
+        # Create Langfuse trace with full input (README prompt)
         trace = langfuse_service.create_trace(
-            name="README Analysis"
+            name="README Analysis",
+            input=readme_input,
         )
+
         raw = await self.llm_service.chat_completion(
-            messages=[{"role": "user", "content": _README_PROMPT + readme[:18000]}],
+            messages=readme_input,
             temperature=0.5, max_tokens=16000,
             response_format={"type": "json_object"}, timeout=120,
             use_mcp=["aws"] if config.ENABLE_AWS_MCP else False,
             _trace=trace
         )
+
+        # Update trace with the LLM output
+        if trace:
+            try:
+                trace.update(output=raw[:10000])
+            except Exception:
+                pass
+
         m = re.search(r'(\{.*\})', raw.strip(), re.DOTALL)
         return json.loads(m.group(1) if m else raw)
 
@@ -861,8 +890,6 @@ class ConversationManager:
             f"  [{w.get('severity','info').upper()}] {w.get('message','')}"
             for w in warnings if isinstance(w, dict)
         ) or "  None"
-        excerpt = "\n".join(ln.strip() for ln in readme.splitlines() if ln.strip())[:2000]
-
         return (
             f"PROJECT: {s('project_name') or repo} ({owner}/{repo})\n"
             f"WORKLOAD: {s('workload_description')} | PLATFORM: {s('current_deployment_platform','unknown')}\n"
@@ -883,7 +910,6 @@ class ConversationManager:
             f"\nREQUIRED ENV VARS:\n{env_str or '  Not detected'}\n"
             f"\n🚨 CRITICAL WARNINGS:\n{crit}\n"
             f"ALL WARNINGS:\n{all_w}\n"
-            f"\nREADME EXCERPT:\n{excerpt}"
         )
 
     # ── Public utility methods ─────────────────────────────────────────────────

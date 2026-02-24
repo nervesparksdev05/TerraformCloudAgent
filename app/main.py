@@ -343,20 +343,32 @@ async def submit_feedback(
 
     try:
         from app.services import langfuse_service
-        # Create an ad-hoc trace just for feedback, or log it if possible
-        trace = langfuse_service.create_trace(
-            name="user-feedback-submission",
-            session_id=session_id,
-            user_id="terraform",
-            input={"rating": feedback.rating, "comment": feedback.comment}
-        )
-        if trace:
+
+        # Link feedback to the actual LLM generation trace if available
+        trace_id = session.last_trace_id
+        if trace_id:
+            # Score the actual conversation turn trace
             langfuse_service.log_score(
-                trace_id=trace.id,
+                trace_id=trace_id,
                 name="user-feedback",
                 value=float(feedback.rating),
                 comment=feedback.comment
             )
+        else:
+            # Fallback: create an ad-hoc trace for feedback if no prior trace exists
+            trace = langfuse_service.create_trace(
+                name="user-feedback-submission",
+                session_id=session_id,
+                user_id="terraform",
+                input={"rating": feedback.rating, "comment": feedback.comment}
+            )
+            if trace:
+                langfuse_service.log_score(
+                    trace_id=trace.id,
+                    name="user-feedback",
+                    value=float(feedback.rating),
+                    comment=feedback.comment
+                )
         return {"message": "Feedback submitted successfully"}
     except Exception as e:
         logger.error("[%s] submit_feedback failed: %s", session_id, e, exc_info=True)
