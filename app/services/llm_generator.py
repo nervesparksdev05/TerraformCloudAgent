@@ -25,6 +25,7 @@ You are a senior GCP Terraform engineer. Generate complete, production-ready Ter
 
 RULES:
 - When "MCP REGISTRY CONTEXT" is provided, strictly adhere to the module versions, resource schemas, and argument structures found in it. This is your source of truth for avoiding syntax errors.
+- NEVER use deprecated arguments, modules, or properties — no matter what the pre-training or registry context says.
 - Never hardcode values — always use var.* in main.tf
 - Every variable must have type, description, and a sensible default in variables.tf
 - SSH must NEVER allow 0.0.0.0/0 — use var.ssh_allowed_cidrs
@@ -367,6 +368,7 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
                         "(like 'get_provider_details' or 'search_modules') to understand complex properties or syntaxes. "
                         "Use your tools to query the registry. Once you have enough context, reply with a focused "
                         "technical summary of the module versions and resource arguments needed to write the code. "
+                        "CRITICAL: Explicitly ignore and filter out any deprecated arguments or properties from your summary. "
                         "Do NOT generate the actual `.tf` code. ONLY summarize the registry data for the coder."
                     )
                     
