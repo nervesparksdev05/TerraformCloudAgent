@@ -111,6 +111,121 @@ def _build_safe_tfvars(params: dict, workspace_path: Path) -> dict:
     return tfvars
 
 
+def _generate_topology_diagram(main_tf: str, params: dict) -> str:
+    """
+    Parse main.tf resource blocks and build a Mermaid flowchart diagram.
+    Called immediately after Terraform files are written — no deployment needed.
+    """
+    import re
+
+    # Detect which resource types are present
+    rtypes = set(re.findall(r'resource\s+"(aws_[\w]+)"', main_tf))
+
+    has_alb    = bool({'aws_lb', 'aws_alb'} & rtypes)
+    has_asg    = 'aws_autoscaling_group' in rtypes
+    has_ec2    = 'aws_instance' in rtypes
+    has_rds    = 'aws_db_instance' in rtypes
+    has_cache  = 'aws_elasticache_cluster' in rtypes or 'aws_elasticache_replication_group' in rtypes
+    has_s3     = 'aws_s3_bucket' in rtypes
+    has_sns    = 'aws_sns_topic' in rtypes
+    has_cw     = 'aws_cloudwatch_metric_alarm' in rtypes
+    has_sm     = 'aws_secretsmanager_secret' in rtypes
+    has_r53    = 'aws_route53_record' in rtypes
+    has_sg     = 'aws_security_group' in rtypes
+    has_iam    = 'aws_iam_role' in rtypes or 'aws_iam_instance_profile' in rtypes
+
+    env       = (params.get('environment') or 'dev').capitalize()
+    region    = params.get('aws_region') or params.get('region') or 'us-east-1'
+    itype     = params.get('instance_type') or 't3.micro'
+    project   = (params.get('project_name') or params.get('github_repo') or 'App').replace('-', '_').replace(' ', '_')
+
+    lines = [
+        'flowchart TD',
+        f'    classDef aws fill:#1a1a2e,stroke:#6366f1,color:#c7d2fe,rx:8',
+        f'    classDef net fill:#0d2137,stroke:#10b981,color:#6ee7b7,rx:8',
+        f'    classDef data fill:#1a0d2e,stroke:#ef4444,color:#fca5a5,rx:8',
+        f'    classDef obs fill:#1a1a0d,stroke:#f59e0b,color:#fde68a,rx:8',
+        f'    classDef free fill:#0d1a0d,stroke:#22c55e,color:#86efac,rx:8',
+        '',
+        f'    Internet(["🌐 Internet"]):::net',
+    ]
+
+    # Entry point: Route53 or ALB or EC2 directly
+    if has_r53:
+        lines.append(f'    R53["🌍 Route 53\\n{project}.com"]:::net')
+        lines.append('    Internet --> R53')
+        entry = 'R53'
+    else:
+        entry = 'Internet'
+
+    if has_alb:
+        lines.append(f'    ALB["⚖️ Application\\nLoad Balancer"]:::net')
+        lines.append(f'    {entry} --> ALB')
+        compute_entry = 'ALB'
+    else:
+        compute_entry = entry
+
+    if has_sg:
+        lines.append(f'    SG["🛡️ Security Group\\nPort 22 · 80 · 5000"]:::net')
+        lines.append(f'    {compute_entry} --> SG')
+        compute_entry = 'SG'
+
+    # Compute
+    if has_asg:
+        lines.append(f'    ASG["📈 Auto Scaling Group\\n{itype}"]:::aws')
+        lines.append(f'    {compute_entry} --> ASG')
+        compute_node = 'ASG'
+    elif has_ec2:
+        lines.append(f'    EC2["🖥️ EC2 Instance\\n{itype} · Ubuntu 22.04"]:::aws')
+        lines.append(f'    {compute_entry} --> EC2')
+        compute_node = 'EC2'
+    else:
+        compute_node = compute_entry
+
+    # IAM
+    if has_iam:
+        lines.append(f'    IAM["🔑 IAM Role &\\nInstance Profile"]:::aws')
+        lines.append(f'    {compute_node} --- IAM')
+
+    # Secrets Manager
+    if has_sm:
+        lines.append(f'    SM["🔐 Secrets Manager\\nEncrypted env vars"]:::data')
+        lines.append(f'    {compute_node} -->|fetch secrets| SM')
+
+    # Data layer
+    if has_rds:
+        rds_class = (params.get('rds_config') or {}).get('instance_class') or 'db.t3.micro'
+        multi_az  = ' · Multi-AZ' if params.get('enable_multi_az') else ''
+        lines.append(f'    RDS["🗄️ RDS Database\\n{rds_class}{multi_az}"]:::data')
+        lines.append(f'    {compute_node} -->|SQL| RDS')
+
+    if has_cache:
+        c_class = (params.get('cache_config') or {}).get('instance_class') or 'cache.t3.micro'
+        lines.append(f'    ELC["⚡ ElastiCache\\n{c_class}"]:::data')
+        lines.append(f'    {compute_node} -->|cache| ELC')
+
+    if has_s3:
+        lines.append(f'    S3["🪣 S3 Bucket\\nObject Storage"]:::free')
+        lines.append(f'    {compute_node} -->|store| S3')
+
+    # Observability
+    if has_cw or has_sns:
+        obs_nodes = []
+        if has_cw:
+            lines.append(f'    CW["🔔 CloudWatch\\nCPU ≥ 80% alarm"]:::obs')
+            lines.append(f'    {compute_node} -.->|metrics| CW')
+            obs_nodes.append('CW')
+        if has_sns:
+            email = params.get('alert_email') or 'alert email'
+            lines.append(f'    SNS["📣 SNS Topic\\n{email}"]:::obs')
+            if obs_nodes:
+                lines.append(f'    CW -->|trigger| SNS')
+            else:
+                lines.append(f'    {compute_node} -.->|notify| SNS')
+
+    return '\n'.join(lines)
+
+
 class WorkflowEngine:
     """Handles background execution of Terraform workflows."""
 
@@ -181,7 +296,14 @@ class WorkflowEngine:
                 self.workspace_manager.write_request_json(workspace_path, request)
 
             plan_output = "Terraform files generated successfully. Plan skipped (multi-cloud mode)."
-            topology_diagram = None
+            # Generate topology diagram immediately from the written Terraform files
+            try:
+                diagram_params = request.request if isinstance(request.request, dict) else {}
+                topology_diagram = _generate_topology_diagram(bundle.main_tf, diagram_params)
+                logger.info("[%s] Topology diagram generated (%d chars)", run_id, len(topology_diagram))
+            except Exception as diag_err:
+                logger.warning("[%s] Topology diagram generation failed: %s", run_id, diag_err)
+                topology_diagram = None
 
             run = self.run_manager.get_run(run_id)
             if run:

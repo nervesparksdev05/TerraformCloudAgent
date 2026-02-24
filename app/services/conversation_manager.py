@@ -721,7 +721,7 @@ class ConversationManager:
             # STEP 2: HA / Multi-AZ (only if medium+ traffic)
             if tier in ("medium", "high", "extreme") and cp.get("enable_multi_az") is None:
                 pending.append(
-                    f"  - 🔄 HIGH AVAILABILITY: With {dau:,} DAU you need zero-downtime failover. "
+                    f"  - 🔄 HIGH AVAILABILITY: With {int(dau):,} DAU you need zero-downtime failover. "
                     f"Enable Multi-AZ for RDS and ElastiCache? "
                     f"Yes = automatic failover in ~60s if the primary fails. "
                     f"No = single AZ, cheaper but brief downtime on failure."

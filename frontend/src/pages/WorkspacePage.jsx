@@ -440,6 +440,8 @@ export const WorkspacePage = ({
             ) : (
               <InsightsPanel
                 topologyDiagram={runData?.topology_diagram}
+                collectedParams={collectedParams}
+                runData={runData}
               />
             )}
           </div>
