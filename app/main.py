@@ -21,7 +21,7 @@ from app.models.schemas import (
     ChatRequest, ChatResponse,
 )
 from app.models.conversation_schemas import (
-    ConversationCreateResponse, ChatMessage, ChatMessageResponse,
+    ConversationCreateResponse, ChatMessage, ChatMessageResponse, FeedbackRequest,
 )
 from app.services.run_manager import RunManager
 from app.services.workflow_engine import WorkflowEngine
@@ -694,15 +694,16 @@ async def reject_via_email(token: str, reason: str = "Rejected via email"):
     if run.status in [RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.REJECTED]:
         return HTMLResponse(f"<h1>⚠️ Already in status {run.status}</h1>", status_code=400)
 
-    run = run_manager.update_run_status(run_id, RunStatus.REJECTED, error=f"Rejected by user: {reason}")
-    if not run.approval_info:
-        run.approval_info = {}
-    run.approval_info.update({
-        "rejected_at": datetime.utcnow().isoformat(),
-        "rejected_by": user_email, "rejection_reason": reason,
-        "method": "email_link", "status": "rejected",
-    })
-    run_manager.save_run_state(run_id, run)
+    updated_run = run_manager.update_run_status(run_id, RunStatus.REJECTED, error=f"Rejected by user: {reason}")
+    if updated_run:
+        if not updated_run.approval_info:
+            updated_run.approval_info = {}
+        updated_run.approval_info.update({
+            "rejected_at": datetime.utcnow().isoformat(),
+            "rejected_by": user_email, "rejection_reason": reason,
+            "method": "email_link", "status": "rejected",
+        })
+        run_manager.save_run_state(run_id, updated_run)
     email_service.send_approval_confirmation_email(user_email, run_id, approved=False, reason=reason)
 
     return HTMLResponse(f"""

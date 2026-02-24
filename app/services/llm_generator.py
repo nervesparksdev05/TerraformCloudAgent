@@ -103,6 +103,7 @@ RULES:
                 params[k] = []
 
         user_prompt = self._build_prompt(params)
+        session_id = params.get("session_id", "unknown_mcp_session")
 
 # 1. Gather MCP context (async version)
         mcp_context = await self._gather_mcp_context_async(user_prompt, session_id)

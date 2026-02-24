@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from app.services.llm_service import AsyncLLMService
 from app.services.github_service import GithubService
 from app.services.aws_service import aws_service
+from app.services import langfuse_service
 from app.models.conversation_schemas import ConversationSession, ChatMessageResponse, ConversationStatus
 from app.core import config
 from app.core.logger import get_logger
@@ -628,6 +629,10 @@ class ConversationManager:
     # ── LLM call ──────────────────────────────────────────────────────────────
 
     async def _call_llm(self, session: ConversationSession) -> str:
+        trace = langfuse_service.create_trace(
+            name="Conversation Turn",
+            session_id=session.session_id,
+        )
         readme_ctx = str(session.collected_parameters.get("readme_context", ""))[:3500]
         snapshot   = json.dumps(session.collected_parameters, indent=2)
         env        = str(session.collected_parameters.get("environment", "") or "NOT SET").upper()
@@ -658,6 +663,7 @@ class ConversationManager:
         return await self.llm_service.chat_completion(
             messages=messages, temperature=0.5, max_tokens=16000,
             response_format={"type": "json_object"}, timeout=120,
+            _trace=trace
         )
 
     def _svc_hints(self, session: ConversationSession) -> str:
@@ -812,11 +818,15 @@ class ConversationManager:
     # ── README analysis ────────────────────────────────────────────────────────
 
     async def _analyze_readme(self, readme: str) -> Dict[str, Any]:
+        trace = langfuse_service.create_trace(
+            name="README Analysis"
+        )
         raw = await self.llm_service.chat_completion(
             messages=[{"role": "user", "content": _README_PROMPT + readme[:18000]}],
             temperature=0.5, max_tokens=16000,
             response_format={"type": "json_object"}, timeout=120,
-            use_mcp=["aws"] if config.ENABLE_AWS_MCP else False
+            use_mcp=["aws"] if config.ENABLE_AWS_MCP else False,
+            _trace=trace
         )
         m = re.search(r'(\{.*\})', raw.strip(), re.DOTALL)
         return json.loads(m.group(1) if m else raw)

@@ -40,6 +40,7 @@ class DatabaseManager:
     def db(self) -> Database:
         if self._db is None:
             self.initialize()
+        assert self._db is not None, "Database initialization failed"
         return self._db
 
     def get_collection(self, collection_name: str) -> Collection:

@@ -208,11 +208,12 @@ class WorkflowEngine:
                 logger.info("[%s] Planning phase complete", run_id)
 
         except Exception as e:
-                    logger.error("[%s] Planning failed: %s", run_id, e, exc_info=True)
-                    self.run_manager.update_run_status(
-                      run_id, RunStatus.FAILED, error=str(e)
-                    )
-                # ================================================================
+            logger.error("[%s] Planning failed: %s", run_id, e, exc_info=True)
+            self.run_manager.update_run_status(
+                run_id, RunStatus.FAILED, error=str(e)
+            )
+
+    # ================================================================
     # APPLY PHASE
     # ================================================================
 
