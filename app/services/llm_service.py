@@ -14,7 +14,7 @@ import asyncio
 import json
 import re
 import time
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, GenerateContentResponse
@@ -176,15 +176,25 @@ def _build_gemini_history(
     return system_instruction, history, last_user
 
 
-def _build_model(model_name: str, system_instruction: Optional[str]) -> genai.GenerativeModel:
+def _build_model(
+    model_name: str, 
+    system_instruction: Optional[str],
+    tools: Optional[List[Any]] = None
+) -> genai.GenerativeModel:
     kwargs: dict[str, Any] = {"model_name": model_name, "safety_settings": _SAFETY_SETTINGS}
     if system_instruction:
         kwargs["system_instruction"] = system_instruction
+    if tools:
+        kwargs["tools"] = tools
     return genai.GenerativeModel(**kwargs)
 
 
 def _build_generation_config(
-    temperature: float, max_tokens: int, json_requested: bool, model_name: str,
+    temperature: float, 
+    max_tokens: int, 
+    json_requested: bool, 
+    model_name: str,
+    tool_choice: Optional[str] = None
 ) -> GenerationConfig:
     cfg = GenerationConfig(temperature=temperature, max_output_tokens=max_tokens)
     if json_requested and _model_supports_json_mode(model_name):
@@ -232,10 +242,11 @@ def _call_gemini_sync(
     max_tokens: int,
     response_format: Optional[Dict[str, str]],
     timeout: int,
+    tools: Optional[List[Any]] = None,
 ) -> str:
     json_requested = bool(response_format and response_format.get("type") == "json_object")
     system_instruction, history, last_user = _build_gemini_history(messages, json_requested)
-    model   = _build_model(model_name, system_instruction)
+    model   = _build_model(model_name, system_instruction, tools=tools)
     gen_cfg = _build_generation_config(temperature, max_tokens, json_requested, model_name)
 
     last_exc: Exception = RuntimeError("No attempts made.")
@@ -331,12 +342,123 @@ class AsyncLLMService(LLMService):
         max_tokens: int = 8000,
         response_format: Optional[Dict[str, str]] = None,
         timeout: int = 60,
+        use_mcp: Union[bool, List[str]] = False,
     ) -> str:
-        """Async chat completion — runs sync call in a thread pool."""
-        return await asyncio.to_thread(
-            _call_gemini_sync,
-            self._model_name, messages, temperature, max_tokens, response_format, timeout,
+        """Async chat completion — support multiple MCP tools if enabled."""
+        enabled_any = config.ENABLE_TERRAFORM_MCP or config.ENABLE_AWS_MCP
+        if not use_mcp or not enabled_any:
+            return await asyncio.to_thread(
+                _call_gemini_sync,
+                self._model_name, messages, temperature, max_tokens, response_format, timeout,
+            )
+
+        # MCP Tool Integration
+        from app.services.mcp_service import mcp_manager
+        
+        requested_servers = use_mcp if isinstance(use_mcp, list) else ["terraform", "aws"]
+        all_mcp_tools = []
+        
+        # Parallel fetch from all requested servers
+        fetch_tasks = []
+        if "terraform" in requested_servers and config.ENABLE_TERRAFORM_MCP:
+            fetch_tasks.append(mcp_manager.list_tools("terraform", config.TERRAFORM_MCP_SERVER))
+        if "aws" in requested_servers and config.ENABLE_AWS_MCP:
+            fetch_tasks.append(mcp_manager.list_tools("aws", config.AWS_MCP_SERVER))
+
+        if fetch_tasks:
+            results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, list):
+                    all_mcp_tools.extend(res)
+                else:
+                    logger.error("Error fetching MCP tools: %s", res)
+
+        if not all_mcp_tools:
+            return await asyncio.to_thread(
+                _call_gemini_sync,
+                self._model_name, messages, temperature, max_tokens, response_format, timeout,
+            )
+
+        # Convert MCP tools to Gemini format
+        gemini_tools = [{"function_declarations": [
+            {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["input_schema"]
+            } for t in all_mcp_tools
+        ]}]
+
+        json_requested = bool(response_format and response_format.get("type") == "json_object")
+        system_instruction, history, last_user = _build_gemini_history(messages, json_requested)
+        model   = _build_model(self._model_name, system_instruction, tools=gemini_tools)
+        # Gemini does NOT support response_mime_type + tools simultaneously — disable JSON mode when tools are active
+        gen_cfg = _build_generation_config(temperature, max_tokens, False, self._model_name)
+
+        chat = model.start_chat(history=history)
+        
+        # Initial call
+        response = await asyncio.to_thread(
+            chat.send_message,
+            last_user,
+            generation_config=gen_cfg,
+            safety_settings=_SAFETY_SETTINGS,
+            request_options={"timeout": timeout},
         )
+
+        # Recursive tool execution
+        max_turns = 10
+        for _ in range(max_turns):
+            if not response.candidates or not response.candidates[0].content.parts:
+                break
+                
+            tool_calls = [p.function_call for p in response.candidates[0].content.parts if p.function_call]
+            if not tool_calls:
+                break
+            
+            tool_responses = []
+            for tc in tool_calls:
+                tool_name = tc.name
+                args = tc.args
+                try:
+                    # Implement explicit 10s timeout for MCP tool execution
+                    mcp_res = await asyncio.wait_for(
+                        mcp_manager.call_tool_by_name(tool_name, args),
+                        timeout=10.0
+                    )
+                    tool_responses.append({
+                        "function_response": {
+                            "name": tool_name,
+                            "response": {"result": str(mcp_res.content)}
+                        }
+                    })
+                except asyncio.TimeoutError:
+                    logger.error("MCP tool call timed out: %s", tool_name)
+                    tool_responses.append({
+                        "function_response": {
+                            "name": tool_name,
+                            "response": {"error": f"Tool '{tool_name}' timed out after 10s."}
+                        }
+                    })
+                except Exception as e:
+                    logger.error("Failed to call tool %s on MCP: %s", tool_name, e)
+                    tool_responses.append({
+                        "function_response": {
+                            "name": tool_name,
+                            "response": {"error": str(e)}
+                        }
+                    })
+
+            # Send tool responses back
+            response = await asyncio.to_thread(
+                chat.send_message,
+                tool_responses,
+                generation_config=gen_cfg,
+                safety_settings=_SAFETY_SETTINGS,
+                request_options={"timeout": timeout},
+            )
+
+        text = _check_candidate(response, max_tokens)
+        return extract_json_object(text) if json_requested else text
 
     async def stream_chat_completion(
         self,

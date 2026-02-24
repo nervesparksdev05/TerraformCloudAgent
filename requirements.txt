@@ -18,6 +18,8 @@ httpx==0.27.2
 python-multipart==0.0.12
 requests>=2.32.2
 json-repair==0.30.0
+mcp>=0.1.0
+boto3>=1.34.0
 
 # Firebase Authentication
 firebase-admin==6.5.0

@@ -1,13 +1,15 @@
-"""llm_generator.py — TerraBot: GCP-only Terraform generator powered by Gemini."""
+"""llm_generator.py — TerraBot: AWS Free Tier Terraform generator powered by Gemini."""
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
-from app.services.llm_service import LLMService
+from app.services.llm_service import LLMService, AsyncLLMService
 from app.core import config
 from app.core.logger import get_logger
 from app.models.schemas import TerraformBundle
@@ -15,37 +17,71 @@ from app.models.schemas import TerraformBundle
 logger = get_logger(__name__)
 
 
+@dataclass
+class ValidationResult:
+    """Result from MCP-based Terraform registry validation."""
+    ok: bool = True
+    notes: List[str] = field(default_factory=list)
+    # Live registry data collected during validation — passed to auto-fix LLM call
+    registry_context: Dict[str, Any] = field(default_factory=dict)
+
+
 class LLMGenerator:
-    """Generate production-grade GCP Terraform files from conversation parameters."""
+    """Generate production-grade AWS Free Tier Terraform files from conversation parameters."""
 
     _SYSTEM = """\
-You are a senior GCP Terraform engineer. Generate complete, production-ready Terraform for Google Cloud.
+You are a senior AWS Terraform engineer specialising in the AWS Free Tier. Generate complete, production-ready Terraform for AWS.
+
+══ STRICT AWS FREE TIER RULES ══
+1. INSTANCES: ALWAYS default to 't3.micro' (Free Tier eligible in all regions). NEVER default to 't2.micro' — some accounts/regions reject it with InvalidParameterCombination.
+2. STORAGE: Keep EBS volumes to 'gp2'. Total storage must not exceed 30GB.
+3. DATABASE: Default to 'db.t3.micro' for RDS.
+4. NETWORKING: Use Default VPC where possible. Avoid expensive NAT Gateways; use Public IPs.
+5. NO SURPRISE COSTS: Never include ALBs, NLBs, or expensive KMS keys unless explicitly requested.
+
+══ TERRAFORM/PROVIDER BLOCK (MANDATORY) ══
+6. EVERY generated main.tf MUST start with:
+   terraform { required_providers { aws = { source = "hashicorp/aws", version = "~> 5.0" } } }
+   provider "aws" { region = var.aws_region }
+   Without this, Terraform uses the wrong provider version or region and the deploy fails.
+
+══ IDEMPOTENCY RULES (prevent EntityAlreadyExists on re-deploy) ══
+7. IAM NAMING: ALWAYS use 'name_prefix' (not 'name') for aws_iam_role, aws_iam_policy, aws_iam_instance_profile.
+8. SECRETS MANAGER: Use 'name_prefix' for aws_secretsmanager_secret. Set recovery_window_in_days = 0.
 
 RULES:
 - Never hardcode values — always use var.* in main.tf
-- Every variable must have type, description, and a sensible default in variables.tf
-- SSH must NEVER allow 0.0.0.0/0 — use var.ssh_allowed_cidrs
+- Tag all resources with Project = var.project_name
+- Every variable must have type, description, and a sensible default in variables.tf — INCLUDING sensitive/secret variables (use default = "")
+- BANNED: Never use 'data "template_file"'. It is deprecated.
+- USER DATA SCRIPT:
+  * Start with: #!/bin/bash, set -e, exec > /var/log/user-data.log 2>&1
+  * Access Terraform variables directly as '${var.VARIABLE_NAME}'
+  * Bash shell variables (APP_DIR, ENV_FILE, REPO_URL) MUST be written as '$${VAR_NAME}' so Terraform renders them as '${VAR_NAME}' for the shell
+  * SYSTEMD SERVICE FILE: Inside <<'EOT' (single-quoted heredoc), shell variables are NOT expanded. WorkingDirectory, EnvironmentFile, ExecStart MUST use hardcoded literal paths (e.g. WorkingDirectory=/home/ubuntu/app). NEVER use $${APP_DIR} or ${APP_DIR} inside <<'EOT'
+  * NODE.JS INSTALL: ALWAYS install Node.js via NodeSource (curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - && sudo apt-get install -y nodejs). NEVER use 'sudo apt install nodejs npm' — it installs an ancient v12 that breaks modern apps
+  * ENV FILE: Write ALL env vars (both secret and non-secret) to .env using 'cat > $${ENV_FILE} <<\'ENVEOF\'' with Terraform variable interpolation. Secret vars default to "" and user updates them after deploy
+- CONSISTENCY: Variable names in 'main.tf' must exactly match 'variables.tf'
+- SSH must NEVER allow 0.0.0.0/0 — use var.ssh_allowed_cidrs. Default MUST be [] (empty list)
+- AMI: NEVER hardcode an AMI ID. ALWAYS use data "aws_ami" lookup with filter ubuntu-jammy-22.04, owners=["099720109477"]. Reference as data.aws_ami.ubuntu.id. Do NOT create an ami_id variable.
+- VPC/SUBNET: ALWAYS use 'data "aws_vpc"' (default=true) and 'data "aws_subnet"' (default_for_az=true). NEVER use 'resource "aws_default_vpc"' or 'resource "aws_default_subnet"' — those are write resources.
+- SECURITY GROUPS: ALWAYS use 'aws_security_group' with inline ingress/egress blocks. NEVER use aws_vpc_security_group_ingress_rule or aws_vpc_security_group_egress_rule.
+- KEY PAIR (OPTIONAL): key_name = (var.key_pair_name != "" && var.key_pair_name != "REPLACE_ME") ? var.key_pair_name : null. Default for key_pair_name MUST be "" (empty string), never "REPLACE_ME".
+- SNS EMAIL (OPTIONAL): aws_sns_topic_subscription MUST include count = (var.alert_email != "" && var.alert_email != "REPLACE_ME@example.com") ? 1 : 0. Default for alert_email MUST be "" (empty string).
+- SECRETS MANAGER: Only generate Secrets Manager resources when use_secrets_manager is explicitly true. Otherwise, secret values go directly into .env as "" placeholders.
 - Resource naming: {project_name}-{environment}-{resource_type}
-- Startup script: clone repo → install deps → build (if needed) → write .env → start app
-- Output every operational value: IPs, URLs, SSH commands, connection strings
+- OUTPUTS: The 'sensitive' argument on an output MUST be a static boolean (true or false). NEVER use a variable expression like sensitive = (var.x == "foo") — Terraform forbids variables in sensitive and will fail at init. Always set sensitive = false or omit entirely.
+- SNS: NEVER use 'confirmation_timeout_on_create' — this argument was removed in AWS provider v4.0.
+- Output every operational value: IPs, URLs, SSH commands
 - Return ONLY valid JSON: {"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."}
 """
 
-    _CICD = """\
-Generate a .github/workflows/deploy.yml for Terraform on GCP.
-Triggers: push to main (apply), PR to main (plan only).
-Auth: echo "$GCP_SA_KEY" | base64 --decode > /tmp/sa_key.json && gcloud auth activate-service-account --key-file=/tmp/sa_key.json
-Required secrets: GCP_SA_KEY, GCP_PROJECT_ID. State stored in GCS remote backend.
-On PR: post terraform plan as PR comment. On push: terraform apply -auto-approve.
-Output ONLY raw YAML — no code fences, no explanation.
-"""
-
     def __init__(self) -> None:
-        self.llm_service = LLMService()
+        self.llm_service = AsyncLLMService()
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def generate_terraform(self, params: Dict[str, Any]) -> TerraformBundle:
+    async def generate_terraform(self, params: Dict[str, Any]) -> TerraformBundle:
         if isinstance(params, str):
             try:
                 params = json.loads(params)
@@ -62,11 +98,10 @@ Output ONLY raw YAML — no code fences, no explanation.
             if k in params and not isinstance(params[k], list):
                 params[k] = []
 
-        bundle = self._call(self._build_prompt(params))
-        bundle.github_workflow_yaml = self._generate_workflow()
-        return self._post_process(bundle)
+        bundle = await self._call(self._build_prompt(params))
+        return await self._post_process_async(bundle)
 
-    def refine_terraform(
+    async def refine_terraform(
         self,
         base_request: str,
         current_code: Dict[str, Any],
@@ -80,18 +115,18 @@ Output ONLY raw YAML — no code fences, no explanation.
             f"Current Terraform:\n{json.dumps(current_code, indent=2)}\n\n"
             "Apply all feedback. Return JSON: {main_tf, variables_tf, outputs_tf}."
         )
-        return self._call(prompt)
+        return await self._call(prompt)
 
-    def diagnose_error(self, error_msg: str, terraform_code: dict) -> dict:
+    async def diagnose_error(self, error_msg: str, terraform_code: dict) -> dict:
         system = (
-            "You are a Senior GCP Cloud Architect diagnosing a Terraform deployment failure.\n"
+            "You are a Senior AWS Cloud Architect diagnosing a Terraform deployment failure.\n"
             "Return ONLY JSON:\n"
             '{"diagnosis": str, "action_type": "manual_action"|"auto_fix", '
             '"suggested_fix": str, "confidence": float}'
         )
         user = f"ERROR:\n{error_msg}\n\nTERRAFORM CODE:\n{json.dumps(terraform_code, indent=2)}"
         try:
-            raw = self.llm_service.chat_completion(
+            raw = await self.llm_service.chat_completion(
                 messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
                 temperature=0.1, response_format={"type": "json_object"},
             )
@@ -101,16 +136,16 @@ Output ONLY raw YAML — no code fences, no explanation.
             return {
                 "diagnosis": "Failed to analyze error.",
                 "action_type": "manual_action",
-                "suggested_fix": "Check GCP console permissions and retry.",
+                "suggested_fix": "Check AWS IAM permissions and security group rules.",
                 "confidence": 0.0,
             }
 
-    def chat_about_plan(self, context: str) -> str:
-        return self.llm_service.chat_completion(
+    async def chat_about_plan(self, context: str) -> str:
+        return await self.llm_service.chat_completion(
             messages=[
                 {"role": "system", "content": (
-                    "You are a helpful GCP Terraform expert. Answer questions about Terraform plans "
-                    "concisely using GCP-native terminology."
+                    "You are a helpful AWS Terraform expert. Answer questions about Terraform plans "
+                    "concisely using AWS-native terminology."
                 )},
                 {"role": "user", "content": context},
             ],
@@ -124,20 +159,19 @@ Output ONLY raw YAML — no code fences, no explanation.
         github_owner   = p.get("github_owner", "")
         github_repo    = p.get("github_repo", "")
         project_name   = p.get("project_name") or github_repo or "app"
-        region         = p.get("gcp_region") or p.get("region") or "us-central1"
-        instance_type  = p.get("instance_type") or ("e2-standard-2" if is_prod else "e2-micro")
+        region         = p.get("aws_region") or p.get("region") or "us-east-1"
+        instance_type  = p.get("instance_type") or ("t3.small" if is_prod else "t3.micro")
         instance_count = int(p.get("instance_count", 1) or 1)
-        storage_gb     = p.get("storage_size_gb", 20) or 20
-        storage_type   = p.get("storage_type") or "pd-balanced"
-        os_image       = p.get("os_image") or "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
+        storage_gb     = p.get("storage_size_gb", 8) or 8
+        storage_type   = p.get("storage_type") or "gp2"
 
         has_db     = p.get("has_database", False)
         db_type    = p.get("database_type", "none")
         db_hosting = p.get("database_hosting_model", "managed_cloud")
         has_cache  = p.get("has_cache", False)
-        has_lb     = p.get("has_load_balancer", False) or (is_prod and instance_count > 1)
+        has_alb    = p.get("use_alb", False) or (is_prod and instance_count > 1)
         has_bkt    = p.get("storage_needs", False)
-        auto_scale = p.get("enable_autoscaling", False)
+        use_asg    = p.get("use_asg", False)
         monitoring = p.get("enable_monitoring", True)
 
         ssh_cidrs = ", ".join(p.get("ssh_allowed_cidrs") or []) or "MISSING — required, never 0.0.0.0/0"
@@ -170,10 +204,10 @@ Output ONLY raw YAML — no code fences, no explanation.
             for s in (p.get("runtime_services") or []) if isinstance(s, dict)
         ) or "  - Main app only"
 
-        readme_ctx = (p.get("readme_context") or "")[:5000] or "Not available — use conservative GCP defaults."
+        readme_ctx = (p.get("readme_context") or "")[:5000] or "Not available — use conservative AWS defaults."
 
         return f"""
-PROVIDER: GCP
+PROVIDER: AWS
 PROJECT: {project_name}  (github.com/{github_owner}/{github_repo})
 ENVIRONMENT: {p.get('environment', 'dev').upper()}
 
@@ -186,114 +220,379 @@ STACK:
   Cache              : {'YES — ' + str(p.get('cache_type','')) if has_cache else 'None'}
   Frontend           : {'YES — ' + str(p.get('frontend_type','')) + ' via ' + str(p.get('frontend_served_by','')) if p.get('has_frontend') else 'None'}
   Websockets         : {'YES — ' + str(p.get('websocket_library','')) if p.get('has_websockets') else 'None'}
-  Docker             : {'YES' if p.get('has_docker') else 'NO (install directly on VM)'}
+  Docker             : {'YES' if p.get('has_docker') else 'NO (install directly on EC2)'}
   Background Jobs    : {'YES — ' + str(p.get('background_job_description','')) if p.get('background_jobs') else 'None'}
   File Storage       : {'YES — ' + str(p.get('storage_description','')) if has_bkt else 'None'}
   Process Manager    : {p.get('process_manager', 'auto-detect from language')}
 
-GCP INFRASTRUCTURE:
-  gcp_project_id   : {p.get('gcp_project_id') or config.GCP_PROJECT_ID or '<required — set GCP_PROJECT_ID in .env>'}
-  gcp_region       : {region}
-  gcp_zone         : {p.get('gcp_zone') or region + '-a'}
+AWS INFRASTRUCTURE:
+  aws_region       : {region}
+  aws_az           : {p.get('aws_az') or region + 'a'}
   instance_type    : {instance_type}
   instance_count   : {instance_count}
-  os_image         : {os_image}
   disk             : {int(storage_gb)}GB {storage_type}
   vpc_cidr         : {p.get('vpc_cidr', '10.0.0.0/16')}
   ssh_allowed_cidrs: {ssh_cidrs}
   ssh_username     : {p.get('ssh_username', 'ubuntu')}
+  ssh_key_name     : {p.get('ssh_key_name') or ''}
 
-FIREWALL PORTS:
+SECURITY GROUP PORTS:
 {ports_block}
 
 DATABASE:
   type        : {db_type}
   hosting     : {db_hosting}
-  cloud_sql_tier  : {p.get('cloud_sql_tier') or ('db-n1-standard-1' if is_prod else 'db-f1-micro')}
-  availability    : {'REGIONAL' if is_prod else 'ZONAL'}
-  db_storage_gb   : {p.get('db_storage_gb', 20)}
+  instance_class  : {(p.get('rds_config') or {}).get('instance_class') or ('db.t3.small' if is_prod else 'db.t3.micro')}
+  multi_az        : {is_prod}
+  allocated_storage: {(p.get('rds_config') or {}).get('allocated_storage') or 20}
 
 CACHE:
-  tier   : {p.get('memorystore_tier') or ('STANDARD_HA' if is_prod else 'BASIC')}
-  size_gb: {p.get('memorystore_size_gb', 1)}
+  instance_class: {(p.get('cache_config') or {}).get('instance_class') or ('cache.t3.small' if is_prod else 'cache.t3.micro')}
 
 MONITORING:
-  log_retention_days: {p.get('log_retention_days', 30)}
   alert_email       : {p.get('alert_email', '')}
   custom_domain     : {p.get('custom_domain', '')}
 
 REQUIRED ENV VARS (each must become a Terraform variable and be injected into startup .env):
 {env_block}
 
-RUNTIME SERVICES (all must be started in startup script; firewall must open their ports):
+RUNTIME SERVICES (all must be started in startup script; security group must open their ports):
 {runtime_block}
 
 INFRASTRUCTURE WARNINGS (must be respected):
 {warn_block}
 
 GENERATION CHECKLIST:
-  include_cloud_sql        : {has_db and db_hosting == 'managed_cloud'}
-  include_memorystore      : {has_cache}
-  include_cloud_storage    : {has_bkt and p.get('storage_provider','none') not in ('cloudinary','external')}
-  include_load_balancer    : {has_lb}
-  include_mig_autoscaling  : {auto_scale}
-  include_cloud_monitoring : {monitoring}
-  include_secret_manager   : True  ← ALWAYS use Secret Manager for any is_secret=true env vars
-  include_cloud_dns        : {bool(p.get('custom_domain'))}
+  include_rds              : {has_db and db_hosting == 'managed_cloud'}
+  include_elasticache      : {has_cache}
+  include_s3               : {has_bkt and p.get('storage_provider','none') == 's3'}
+  include_alb              : {has_alb}
+  include_asg              : {use_asg}
+  include_cloudwatch       : {monitoring}
+  include_secrets_manager  : {p.get('use_secrets_manager', False)}
+  include_route53          : {bool(p.get('custom_domain'))}
 
-SECRETS (is_secret=true vars from README — MUST go into GCP Secret Manager):
+SECRETS HANDLING:
+  use_secrets_manager: {p.get('use_secrets_manager', False)}
+  If use_secrets_manager is true:
+    - Generate aws_secretsmanager_secret + aws_secretsmanager_secret_version for each is_secret var
+    - IAM policy granting EC2 secretsmanager:GetSecretValue
+    - Startup script fetches secrets at boot via 'aws secretsmanager get-secret-value'
+  If use_secrets_manager is false (DEFAULT for dev):
+    - Write ALL env vars (secret and non-secret) directly to .env using Terraform var interpolation
+    - Secret vars will have default="" in variables.tf
+    - User updates .env on the instance after deploy with real values
+    - DO NOT generate any aws_secretsmanager resources
+
+is_secret vars from README:
 {chr(10).join('  - ' + ev.get('name','') for ev in (p.get('required_env_vars') or []) if isinstance(ev, dict) and ev.get('is_secret')) or '  None detected'}
-Extra secrets requested: {', '.join(p.get('secrets_to_store') or []) or 'none'}
 
 STARTUP SCRIPT MUST:
-  1. Clone: https://github.com/{github_owner}/{github_repo}
-  2. Install: {p.get('install_command') or 'auto-detect from language'}
-  3. Build:   {p.get('build_command') or 'skip if not needed'}
-  4. Write NON-SECRET env vars directly to .env
-  5. For EVERY is_secret var: fetch from Secret Manager at boot:
-       export SECRET_VALUE=$(gcloud secrets versions access latest \
-         --secret="SECRET_NAME" --project="{p.get('gcp_project_id') or config.GCP_PROJECT_ID}" 2>/dev/null || echo "")
-       echo "SECRET_NAME=$SECRET_VALUE" >> /app/.env
-     Do this for EACH secret — never hardcode secret values in Terraform or startup script.
-  6. Start:   {p.get('app_start_command') or 'auto-detect from language/framework'}
-  7. Configure process manager ({p.get('process_manager','systemd')}) for auto-restart on reboot
-
-TERRAFORM SECRET MANAGER RESOURCES TO GENERATE (for each is_secret var):
-  - google_secret_manager_secret (lifecycle: ignore_changes = [labels])
-  - google_secret_manager_secret_version with placeholder value "REPLACE_ME" (user uploads real value later)
-  - google_secret_manager_iam_member granting the VM service account roles/secretmanager.secretAccessor
-  - google_project_service to enable secretmanager.googleapis.com
+  1. #!/bin/bash + set -e + exec > /var/log/user-data.log 2>&1
+  2. Install Node.js via NodeSource: curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - && sudo apt-get install -y nodejs
+  3. Clone: https://github.com/{github_owner}/{github_repo}
+  4. Install: {p.get('install_command') or 'npm install'}
+  5. Build:   {p.get('build_command') or 'skip if not needed'}
+  6. Write ALL env vars to .env using cat heredoc with Terraform var interpolation
+  7. Create systemd service with HARDCODED paths (WorkingDirectory=/home/ubuntu/app)
+  8. systemctl daemon-reload + enable + start
 
 Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."}}
 """
 
     # ── Internals ──────────────────────────────────────────────────────────────
 
-    def _call(self, user_prompt: str) -> TerraformBundle:
-        raw = self.llm_service.chat_completion(
+    async def _call(self, user_prompt: str) -> TerraformBundle:
+        raw = await self.llm_service.chat_completion(
             messages=[
                 {"role": "system", "content": self._SYSTEM},
                 {"role": "user",   "content": user_prompt},
             ],
-            temperature=0.1, max_tokens=16384,
+            temperature=0.1, max_tokens=8192,
             response_format={"type": "json_object"}, timeout=120,
         )
         data = json.loads(raw)
-        for key in ("main_tf", "variables_tf", "outputs_tf", "github_workflow_yaml"):
+        for key in ("main_tf", "variables_tf", "outputs_tf"):
             val = data.get(key, "")
             data[key] = json.dumps(val, indent=2) if isinstance(val, dict) else str(val or "")
-        return TerraformBundle(**data)
+        bundle = TerraformBundle(**data)
+        return self._sanitize_bundle(bundle)
 
-    def _generate_workflow(self) -> str:
-        try:
-            raw = self.llm_service.chat_completion(
-                messages=[{"role": "user", "content": self._CICD}],
-                temperature=0.1, max_tokens=12000, timeout=60,
+    # ── Post-generation sanitizer ─────────────────────────────────────────────
+
+    @staticmethod
+    def _sanitize_bundle(bundle: TerraformBundle) -> TerraformBundle:
+        """
+        Strip every known-bad pattern from generated HCL BEFORE terraform validate.
+
+        Fix index:
+          FIX 1  — sensitive = (var.x ...) in outputs     → terraform init fails
+          FIX 2  — aws_default_vpc/subnet resource         → write resource, forbidden
+          FIX 3  — aws_vpc_security_group_*_rule           → cidr_blocks not supported
+          FIX 4  — confirmation_timeout_on_create in SNS   → removed in provider v4+
+          FIX 5  — SNS subscription missing count guard    → apply fails on blank email
+          FIX 6  — key_name = var.key_pair_name directly   → InvalidKeyPair on blank value
+          FIX 7  — ami_id variable                         → replaced by data source
+          FIX 8  — ssh_allowed_cidrs default 0.0.0.0/0     → security risk
+          FIX 9  — instance_type default t2.micro          → InvalidParameterCombination
+          FIX 10 — key_pair_name default "REPLACE_ME"      → InvalidKeyPair at apply
+          FIX 11 — alert_email default "REPLACE_ME@..."    → SNS invalid endpoint at apply
+          FIX 12 — missing provider/terraform block        → wrong region/version
+        """
+        import re
+
+        main      = bundle.main_tf
+        variables = bundle.variables_tf
+        outputs   = bundle.outputs_tf
+
+        # ══════════════════════════════════════════════════════════════════
+        # outputs.tf fixes
+        # ══════════════════════════════════════════════════════════════════
+
+        # FIX 1: Remove any sensitive= that uses a variable expression.
+        # Catches all of:
+        #   sensitive = (var.key_pair_name == "" || var.key_pair_name == "REPLACE_ME")
+        #   sensitive = var.x
+        #   sensitive = (var.x)
+        outputs = re.sub(
+            r'\s*sensitive\s*=\s*(?:\()?(?:var\.\w+|\(var\.[^)]+\))[^,\n}]*(?:\))?',
+            '\n  sensitive = false',
+            outputs,
+        )
+        # Belt-and-suspenders: catch any remaining bare var. references in sensitive=
+        outputs = re.sub(r'\s*sensitive\s*=\s*var\.\w+', '\n  sensitive = false', outputs)
+
+        # ══════════════════════════════════════════════════════════════════
+        # main.tf fixes
+        # ══════════════════════════════════════════════════════════════════
+
+        # FIX 2: aws_default_vpc/subnet write resources → data sources
+        main = re.sub(
+            r'resource\s+"aws_default_vpc"\s+"\w+"\s*\{[^}]*\}',
+            'data "aws_vpc" "default" {\n  default = true\n}',
+            main, flags=re.DOTALL,
+        )
+        main = re.sub(
+            r'resource\s+"aws_default_subnet"\s+"\w+"\s*\{[^}]*\}',
+            'data "aws_subnet" "default" {\n  vpc_id         = data.aws_vpc.default.id\n  default_for_az = true\n}',
+            main, flags=re.DOTALL,
+        )
+        main = re.sub(r'aws_default_vpc\.\w+\.id',    'data.aws_vpc.default.id',    main)
+        main = re.sub(r'aws_default_subnet\.\w+\.id', 'data.aws_subnet.default.id', main)
+
+        # FIX 3: aws_vpc_security_group_*_rule → not allowed to use cidr_blocks
+        # Remove the resource entirely; LLM must use aws_security_group with inline blocks
+        main = re.sub(
+            r'resource\s+"aws_vpc_security_group_(?:ingress|egress)_rule"\s+"\w+"\s*\{[^}]*\}',
+            '# REMOVED: use aws_security_group with inline ingress/egress blocks',
+            main, flags=re.DOTALL,
+        )
+
+        # FIX 4: confirmation_timeout_on_create removed in AWS provider v4+
+        main = re.sub(r'\s*confirmation_timeout_on_create\s*=\s*\d+', '', main)
+
+        # FIX 5: SNS topic subscription must have count guard for empty/placeholder email
+        # Prevents: InvalidParameter: Invalid parameter: Endpoint
+        def _add_sns_count_guard(m: re.Match) -> str:
+            block = m.group(0)
+            if 'count' not in block:
+                block = block.replace(
+                    '{',
+                    '{\n  count = (var.alert_email != "" && var.alert_email != "REPLACE_ME@example.com") ? 1 : 0',
+                    1,
+                )
+            return block
+
+        main = re.sub(
+            r'resource\s+"aws_sns_topic_subscription"\s+"\w+"\s*\{[^}]+\}',
+            _add_sns_count_guard,
+            main, flags=re.DOTALL,
+        )
+
+        # FIX 6: key_name must use null when key_pair_name is blank or placeholder
+        # Prevents: InvalidKeyPair.NotFound: The key pair 'REPLACE_ME' does not exist
+        main = re.sub(
+            r'key_name\s*=\s*var\.key_pair_name',
+            'key_name = (var.key_pair_name != "" && var.key_pair_name != "REPLACE_ME") ? var.key_pair_name : null',
+            main,
+        )
+
+        # FIX 12: Ensure terraform + provider block exists
+        if 'required_providers' not in main:
+            provider_block = (
+                'terraform {\n'
+                '  required_providers {\n'
+                '    aws = {\n'
+                '      source  = "hashicorp/aws"\n'
+                '      version = "~> 5.0"\n'
+                '    }\n'
+                '  }\n'
+                '}\n\n'
+                'provider "aws" {\n'
+                '  region = var.aws_region\n'
+                '}\n\n'
             )
-            return raw.replace("```yaml", "").replace("```yml", "").replace("```", "").strip()
+            main = provider_block + main
+        elif 'provider "aws"' not in main:
+            main = main + '\nprovider "aws" {\n  region = var.aws_region\n}\n'
+
+        # ══════════════════════════════════════════════════════════════════
+        # variables.tf fixes
+        # ══════════════════════════════════════════════════════════════════
+
+        # FIX 7: Remove obsolete ami_id variable (data source used instead)
+        variables = re.sub(
+            r'variable\s+"ami_id"\s*\{[^}]*\}\s*',
+            '', variables, flags=re.DOTALL,
+        )
+
+        # FIX 8: ssh_allowed_cidrs default must be [] not ["0.0.0.0/0"]
+        variables = re.sub(
+            r'(variable\s+"ssh_allowed_cidrs"[^{]*\{[^}]*default\s*=\s*)\[\s*"0\.0\.0\.0/0"\s*\]',
+            r'\1[]',
+            variables, flags=re.DOTALL,
+        )
+
+        # FIX 9: instance_type default must be t3.micro not t2.micro
+        variables = re.sub(
+            r'(variable\s+"instance_type"[^{]*\{[^}]*default\s*=\s*)"t2\.micro"',
+            r'\1"t3.micro"',
+            variables, flags=re.DOTALL,
+        )
+
+        # FIX 10: key_pair_name default must be "" not "REPLACE_ME"
+        # Prevents InvalidKeyPair.NotFound when user hasn't set a key pair
+        variables = re.sub(
+            r'(variable\s+"key_pair_name"[^{]*\{[^}]*default\s*=\s*)"REPLACE_ME"',
+            r'\1""',
+            variables, flags=re.DOTALL,
+        )
+
+        # FIX 11: alert_email default must be "" not "REPLACE_ME@example.com"
+        # Prevents SNS InvalidParameter: Invalid parameter: Endpoint at apply time
+        variables = re.sub(
+            r'(variable\s+"alert_email"[^{]*\{[^}]*default\s*=\s*)"REPLACE_ME@example\.com"',
+            r'\1""',
+            variables, flags=re.DOTALL,
+        )
+
+        bundle.main_tf      = main
+        bundle.variables_tf = variables
+        bundle.outputs_tf   = outputs
+        logger.debug("_sanitize_bundle: all 12 fixes applied successfully.")
+        return bundle
+
+    async def validate_with_mcp(self, bundle: TerraformBundle) -> ValidationResult:
+        """
+        Post-generation validation using the Terraform MCP registry.
+        """
+        if not config.ENABLE_TERRAFORM_MCP:
+            logger.debug("validate_with_mcp: ENABLE_TERRAFORM_MCP=False — skipping.")
+            return ValidationResult(ok=True, notes=["MCP validation skipped (disabled)."])
+
+        notes: List[str] = []
+        ok = True
+        registry_context: Dict[str, Any] = {}
+
+        try:
+            from app.services.mcp_service import mcp_manager
+
+            tools = await mcp_manager.list_tools("terraform", config.TERRAFORM_MCP_SERVER)
+            if not tools:
+                logger.warning("validate_with_mcp: No MCP tools available — skipping registry check.")
+                return ValidationResult(ok=True, notes=["MCP validation skipped (no tools available)."])
+
+            tool_names = {t["name"] for t in tools}
+            logger.info("validate_with_mcp: %d MCP tools available", len(tools))
+
+            # ── Check 1: Latest provider version ──────────────────────────────
+            if "get_latest_provider_version" in tool_names:
+                try:
+                    result = await asyncio.wait_for(
+                        mcp_manager.call_tool_by_name(
+                            "get_latest_provider_version",
+                            {"namespace": "hashicorp", "name": "aws"},
+                        ),
+                        timeout=15.0,
+                    )
+                    version_info = str(result.content) if result else ""
+                    registry_context["aws_provider_version"] = version_info
+                    notes.append(f"Registry: hashicorp/aws provider — {version_info[:120]}")
+                    logger.info("validate_with_mcp: provider version check OK")
+                except asyncio.TimeoutError:
+                    logger.warning("validate_with_mcp: provider version check timed out")
+                    notes.append("Registry: provider version check timed out.")
+                except Exception as e:
+                    logger.warning("validate_with_mcp: provider version check failed: %s", e)
+                    notes.append(f"Registry: provider version check failed ({e}).")
+
+            # ── Check 2: Verify resource types + collect registry docs ─────────
+            if bundle.main_tf:
+                import re
+                resource_types = list(set(re.findall(r'resource\s+"(aws_[\w]+)"', bundle.main_tf)))
+                resource_docs: Dict[str, str] = {}
+
+                for rtype in resource_types[:8]:
+                    if "search_providers" in tool_names:
+                        try:
+                            search_result = await asyncio.wait_for(
+                                mcp_manager.call_tool_by_name(
+                                    "search_providers",
+                                    {
+                                        "provider_name": "aws",
+                                        "provider_namespace": "hashicorp",
+                                        "service_slug": rtype,
+                                        "provider_document_type": "resources",
+                                    },
+                                ),
+                                timeout=15.0,
+                            )
+                            if search_result and search_result.content:
+                                raw_search = str(search_result.content)
+                                doc_id_match = re.search(r'"provider_doc_id"\s*:\s*"?(\d+)"?', raw_search)
+                                if doc_id_match and "get_provider_details" in tool_names:
+                                    doc_id = doc_id_match.group(1)
+                                    try:
+                                        detail_result = await asyncio.wait_for(
+                                            mcp_manager.call_tool_by_name(
+                                                "get_provider_details",
+                                                {"provider_doc_id": doc_id},
+                                            ),
+                                            timeout=15.0,
+                                        )
+                                        if detail_result and detail_result.content:
+                                            resource_docs[rtype] = str(detail_result.content)[:3000]
+                                            notes.append(f"Registry: ✅ {rtype} — docs fetched.")
+                                        else:
+                                            resource_docs[rtype] = raw_search[:1000]
+                                            notes.append(f"Registry: ✅ {rtype} — found in registry.")
+                                    except Exception:
+                                        resource_docs[rtype] = raw_search[:1000]
+                                        notes.append(f"Registry: ✅ {rtype} — found (detail fetch failed).")
+                                else:
+                                    resource_docs[rtype] = raw_search[:1000]
+                                    notes.append(f"Registry: ✅ {rtype} — found in registry.")
+                                logger.info("validate_with_mcp: %s → found", rtype)
+                            else:
+                                notes.append(f"Registry: ⚠️  {rtype} — not found (may need renaming).")
+                                ok = False
+                                logger.warning("validate_with_mcp: %s → NOT FOUND", rtype)
+                        except asyncio.TimeoutError:
+                            logger.warning("validate_with_mcp: search timed out for %s", rtype)
+                            notes.append(f"Registry: {rtype} — check timed out.")
+                        except Exception as e:
+                            logger.warning("validate_with_mcp: search failed for %s: %s", rtype, e)
+                            notes.append(f"Registry: {rtype} — search error ({e}).")
+
+                if resource_docs:
+                    registry_context["resource_docs"] = resource_docs
+
         except Exception as e:
-            logger.error("CI/CD workflow generation failed: %s", e)
-            return "# Error generating CI/CD workflow."
+            logger.error("validate_with_mcp: unexpected error: %s", e, exc_info=True)
+            notes.append(f"MCP validation error: {e}")
+            ok = True  # Non-blocking
+
+        return ValidationResult(ok=ok, notes=notes, registry_context=registry_context)
 
     def _post_process(self, bundle: TerraformBundle) -> TerraformBundle:
         """Run terraform fmt + validate if CLI is available."""
@@ -320,7 +619,129 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
             try:
                 subprocess.run(["terraform", "init", "-backend=false"], cwd=tmpdir, check=True, capture_output=True)
                 subprocess.run(["terraform", "validate"], cwd=tmpdir, check=True, capture_output=True)
+                logger.info("terraform validate: OK")
             except subprocess.CalledProcessError as e:
                 logger.error("terraform validate failed: %s", e.stderr.decode(errors="replace") if e.stderr else "")
+
+        return bundle
+
+    async def _auto_fix_with_mcp(
+        self,
+        bundle: TerraformBundle,
+        validation: ValidationResult,
+    ) -> TerraformBundle:
+        """
+        If MCP validation collected registry docs (or found issues), call the LLM
+        with that live context so it can patch the Terraform files.
+        """
+        ctx = validation.registry_context
+        if not ctx:
+            logger.debug("_auto_fix_with_mcp: no registry context — skipping auto-fix.")
+            return bundle
+
+        logger.info("_auto_fix_with_mcp: running LLM auto-fix with registry context.")
+
+        provider_ver  = ctx.get("aws_provider_version", "unknown")
+        resource_docs = ctx.get("resource_docs", {})
+
+        docs_block = ""
+        for rtype, doc in resource_docs.items():
+            docs_block += f"\n### {rtype}\n{doc[:1500]}\n"
+
+        issues_block = "\n".join(
+            n for n in validation.notes if "⚠️" in n or "error" in n.lower()
+        ) or "No issues found."
+
+        fix_prompt = f"""\
+You are updating Terraform files based on LIVE data fetched from the Terraform Registry.
+
+Hashicorp AWS Provider latest version: {provider_ver}
+
+Registry documentation for resources in this configuration:
+{docs_block or 'No documentation available.'}
+
+Validation issues to fix:
+{issues_block}
+
+Current Terraform files:
+```hcl
+# main.tf
+{bundle.main_tf}
+
+# variables.tf
+{bundle.variables_tf}
+
+# outputs.tf
+{bundle.outputs_tf}
+```
+
+Instructions:
+1. Fix any deprecated or incorrect resource arguments using the registry docs above.
+2. Update the required_providers block to use the latest provider version.
+3. Correct any resource type names that were flagged as not found.
+4. Do NOT change working infrastructure logic — only fix registry-identified issues.
+5. Preserve all existing variables and outputs unless they reference incorrect resources.
+
+Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."}}
+"""
+
+        try:
+            raw = await self.llm_service.chat_completion(
+                messages=[
+                    {"role": "system", "content": self._SYSTEM},
+                    {"role": "user",   "content": fix_prompt},
+                ],
+                temperature=0.05,
+                max_tokens=8192,
+                response_format={"type": "json_object"},
+                timeout=120,
+            )
+            data = json.loads(raw)
+            for key in ("main_tf", "variables_tf", "outputs_tf"):
+                val = data.get(key, "")
+                data[key] = json.dumps(val, indent=2) if isinstance(val, dict) else str(val or "")
+
+            fixed = TerraformBundle(
+                main_tf=data.get("main_tf") or bundle.main_tf,
+                variables_tf=data.get("variables_tf") or bundle.variables_tf,
+                outputs_tf=data.get("outputs_tf") or bundle.outputs_tf,
+                github_workflow_yaml=bundle.github_workflow_yaml,
+            )
+            logger.info("_auto_fix_with_mcp: auto-fix applied successfully.")
+            return fixed
+
+        except Exception as e:
+            logger.error("_auto_fix_with_mcp: LLM fix failed (%s) — using original bundle.", e)
+            return bundle
+
+    async def _post_process_async(self, bundle: TerraformBundle) -> TerraformBundle:
+        """
+        Full async post-generation pipeline:
+          1. terraform fmt  (thread)
+          2. terraform validate  (thread)
+          3. validate_with_mcp()  — registry check + doc collection
+          4. _auto_fix_with_mcp() — LLM fix pass using live registry data (if MCP active)
+          5. terraform fmt again on the fixed bundle  (thread, only if step 4 ran)
+        """
+        bundle = await asyncio.to_thread(self._post_process, bundle)
+
+        if not config.ENABLE_TERRAFORM_MCP:
+            return bundle
+
+        validation = await self.validate_with_mcp(bundle)
+        for note in validation.notes:
+            logger.info("MCP validation: %s", note)
+
+        has_context = bool(validation.registry_context)
+        has_issues  = not validation.ok
+
+        if has_context or has_issues:
+            if has_issues:
+                logger.warning("MCP registry validation found issues — running auto-fix.")
+            else:
+                logger.info("MCP registry context available — running auto-fix for best-practice alignment.")
+
+            bundle = await self._auto_fix_with_mcp(bundle, validation)
+            bundle = await asyncio.to_thread(self._post_process, bundle)
 
         return bundle
