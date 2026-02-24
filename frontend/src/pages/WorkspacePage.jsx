@@ -108,10 +108,11 @@ export const WorkspacePage = ({
           <h2 className="text-lg font-semibold">{githubRepo || 'Deployment Session'}</h2>
           <div className="flex gap-1">
             <button
-              className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all ${activeTab === 'chat'
+              className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                activeTab === 'chat'
                   ? 'bg-primary-gradient text-white'
                   : 'text-gray-500 hover:text-gray-300'
-                }`}
+              }`}
               onClick={() => onTabChange('chat')}
               style={activeTab === 'chat' ? { background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' } : {}}
             >
@@ -120,10 +121,11 @@ export const WorkspacePage = ({
             {runId && (
               <>
                 <button
-                  className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all ${activeTab === 'review'
+                  className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                    activeTab === 'review'
                       ? 'bg-primary-gradient text-white'
                       : 'text-gray-500 hover:text-gray-300'
-                    }`}
+                  }`}
                   onClick={() => onTabChange('review')}
                   style={activeTab === 'review' ? { background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' } : {}}
                 >
@@ -131,10 +133,11 @@ export const WorkspacePage = ({
                   {hasUnsaved && <span className="ml-1.5 w-1.5 h-1.5 rounded-full bg-yellow-400 inline-block" />}
                 </button>
                 <button
-                  className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all ${activeTab === 'manage'
+                  className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                    activeTab === 'manage'
                       ? 'bg-primary-gradient text-white'
                       : 'text-gray-500 hover:text-gray-300'
-                    }`}
+                  }`}
                   onClick={() => onTabChange('manage')}
                   style={activeTab === 'manage' ? { background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' } : {}}
                 >

@@ -52,7 +52,7 @@ export const ChatPanel = ({
           </Card>
         </div>
       )}
-
+      
       {!isComplete && (
         <ChatInput
           value={inputMessage}

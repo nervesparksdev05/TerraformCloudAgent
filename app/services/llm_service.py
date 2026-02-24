@@ -14,7 +14,8 @@ import asyncio
 import json
 import re
 import time
-from typing import Any, AsyncIterator, Dict, List, Optional
+
+from typing import Any, Dict, List, Optional, Union, AsyncIterator
 
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, GenerateContentResponse
@@ -177,15 +178,25 @@ def _build_gemini_history(
     return system_instruction, history, last_user
 
 
-def _build_model(model_name: str, system_instruction: Optional[str]) -> genai.GenerativeModel:
+def _build_model(
+    model_name: str, 
+    system_instruction: Optional[str],
+    tools: Optional[List[Any]] = None
+) -> genai.GenerativeModel:
     kwargs: dict[str, Any] = {"model_name": model_name, "safety_settings": _SAFETY_SETTINGS}
     if system_instruction:
         kwargs["system_instruction"] = system_instruction
+    if tools:
+        kwargs["tools"] = tools
     return genai.GenerativeModel(**kwargs)
 
 
 def _build_generation_config(
-    temperature: float, max_tokens: int, json_requested: bool, model_name: str,
+    temperature: float, 
+    max_tokens: int, 
+    json_requested: bool, 
+    model_name: str,
+    tool_choice: Optional[str] = None
 ) -> GenerationConfig:
     cfg = GenerationConfig(temperature=temperature, max_output_tokens=max_tokens)
     if json_requested and _model_supports_json_mode(model_name):
@@ -225,7 +236,6 @@ def _check_candidate(response: GenerateContentResponse, max_tokens: int) -> str:
 
 
 # ── Core sync call with retry ─────────────────────────────────────────────────
-
 def _call_gemini_sync(
     model_name: str,
     messages: List[Dict[str, str]],
@@ -237,24 +247,23 @@ def _call_gemini_sync(
 ) -> str:
     json_requested = bool(response_format and response_format.get("type") == "json_object")
     system_instruction, history, last_user = _build_gemini_history(messages, json_requested)
-    model   = _build_model(model_name, system_instruction)
+    model = _build_model(model_name, system_instruction)
     gen_cfg = _build_generation_config(temperature, max_tokens, json_requested, model_name)
 
     last_exc: Exception = RuntimeError("No attempts made.")
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             t0 = time.time()
-            chat     = model.start_chat(history=history)
+            chat = model.start_chat(history=history)
             response = chat.send_message(
                 last_user,
                 generation_config=gen_cfg,
                 safety_settings=_SAFETY_SETTINGS,
                 request_options={"timeout": timeout},
             )
+
             text = _check_candidate(response, max_tokens)
-            logger.debug("Gemini response (first 500): %.500s", text)
-            
-            # Usage metrics extraction
+
             usage_metadata = getattr(response, "usage_metadata", None)
             usage = None
             if usage_metadata:
@@ -262,25 +271,26 @@ def _call_gemini_sync(
                     "input": getattr(usage_metadata, "prompt_token_count", 0),
                     "output": getattr(usage_metadata, "candidates_token_count", 0),
                     "total": getattr(usage_metadata, "total_token_count", 0),
-                    "unit": "TOKENS"
+                    "unit": "TOKENS",
                 }
 
             result = extract_json_object(text) if json_requested else text
-            
-            langfuse_service.log_generation(
-                _trace,
-                name="gemini-chat",
-                model=model_name,
-                input_messages=messages,
-                output=result[:10000],  # Avoid huge strings locking up Langfuse
-                usage=usage,
-                start_time=t0,
-            )
-            
+
+            if _trace:
+                langfuse_service.log_generation(
+                    _trace,
+                    name="gemini-chat",
+                    model=model_name,
+                    input_messages=messages,
+                    output=result[:10000],
+                    usage=usage,
+                    start_time=t0,
+                )
+
             return result
 
         except ValueError:
-            raise  # Content/safety/JSON issues — don't retry
+            raise
 
         except _RETRYABLE_EXCEPTIONS as exc:
             last_exc = exc
@@ -295,9 +305,7 @@ def _call_gemini_sync(
             logger.error("Gemini unexpected error: %s", exc, exc_info=True)
             raise
 
-    logger.error("Gemini failed after %d retries: %s", _MAX_RETRIES, last_exc)
     raise last_exc
-
 
 # ── Public service classes ────────────────────────────────────────────────────
 
@@ -347,10 +355,6 @@ class LLMService:
 class AsyncLLMService(LLMService):
     """
     Asynchronous Gemini LLM service.
-
-    Adds:
-      - async chat_completion (thread-pool wrapper — avoids blocking the event loop)
-      - async stream_chat_completion (true Gemini streaming)
     """
 
     async def chat_completion(  # type: ignore[override]
@@ -361,32 +365,160 @@ class AsyncLLMService(LLMService):
         response_format: Optional[Dict[str, str]] = None,
         timeout: int = 60,
         _trace: Optional[Any] = None,
+        use_mcp: Union[bool, List[str]] = False,
     ) -> str:
-        """Async chat completion — runs sync call in a thread pool."""
-        return await asyncio.to_thread(
-            _call_gemini_sync,
-            self._model_name, messages, temperature, max_tokens, response_format, timeout, _trace
+
+        enabled_any = config.ENABLE_TERRAFORM_MCP or config.ENABLE_AWS_MCP
+
+        # Fast path (no MCP)
+        if not use_mcp or not enabled_any:
+            return await asyncio.to_thread(
+                _call_gemini_sync,
+                self._model_name,
+                messages,
+                temperature,
+                max_tokens,
+                response_format,
+                timeout,
+                _trace,
+            )
+
+        from app.services.mcp_service import mcp_manager
+
+        requested_servers = use_mcp if isinstance(use_mcp, list) else ["terraform", "aws"]
+        all_mcp_tools = []
+
+        fetch_tasks = []
+        if "terraform" in requested_servers and config.ENABLE_TERRAFORM_MCP:
+            fetch_tasks.append(
+                mcp_manager.list_tools("terraform", config.TERRAFORM_MCP_SERVER)
+            )
+        if "aws" in requested_servers and config.ENABLE_AWS_MCP:
+            fetch_tasks.append(
+                mcp_manager.list_tools("aws", config.AWS_MCP_SERVER)
+            )
+
+        if fetch_tasks:
+            results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, list):
+                    all_mcp_tools.extend(res)
+                else:
+                    logger.error("Error fetching MCP tools: %s", res)
+
+        if not all_mcp_tools:
+            return await asyncio.to_thread(
+                _call_gemini_sync,
+                self._model_name,
+                messages,
+                temperature,
+                max_tokens,
+                response_format,
+                timeout,
+                _trace,
+            )
+
+        gemini_tools = [{
+            "function_declarations": [
+                {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": t["input_schema"],
+                }
+                for t in all_mcp_tools
+            ]
+        }]
+
+        json_requested = bool(response_format and response_format.get("type") == "json_object")
+        system_instruction, history, last_user = _build_gemini_history(messages, json_requested)
+
+        model = _build_model(self._model_name, system_instruction, tools=gemini_tools)
+
+        gen_cfg = _build_generation_config(
+            temperature,
+            max_tokens,
+            False,
+            self._model_name,
         )
+
+        chat = model.start_chat(history=history)
+
+        response = await asyncio.to_thread(
+            chat.send_message,
+            last_user,
+            generation_config=gen_cfg,
+            safety_settings=_SAFETY_SETTINGS,
+            request_options={"timeout": timeout},
+        )
+
+        for _ in range(10):
+            if not response.candidates or not response.candidates[0].content.parts:
+                break
+
+            tool_calls = [
+                p.function_call
+                for p in response.candidates[0].content.parts
+                if p.function_call
+            ]
+
+            if not tool_calls:
+                break
+
+            tool_responses = []
+
+            for tc in tool_calls:
+                try:
+                    mcp_res = await asyncio.wait_for(
+                        mcp_manager.call_tool_by_name(tc.name, tc.args),
+                        timeout=10.0,
+                    )
+                    tool_responses.append({
+                        "function_response": {
+                            "name": tc.name,
+                            "response": {"result": str(mcp_res.content)},
+                        }
+                    })
+                except asyncio.TimeoutError:
+                    tool_responses.append({
+                        "function_response": {
+                            "name": tc.name,
+                            "response": {"error": "Tool timed out after 10s"},
+                        }
+                    })
+                except Exception as e:
+                    tool_responses.append({
+                        "function_response": {
+                            "name": tc.name,
+                            "response": {"error": str(e)},
+                        }
+                    })
+
+            response = await asyncio.to_thread(
+                chat.send_message,
+                tool_responses,
+                generation_config=gen_cfg,
+                safety_settings=_SAFETY_SETTINGS,
+                request_options={"timeout": timeout},
+            )
+
+        text = _check_candidate(response, max_tokens)
+        return extract_json_object(text) if json_requested else text
 
     async def stream_chat_completion(
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         max_tokens: int = 8000,
-        response_format: Optional[Dict[str, str]] = None,  # ignored for streaming
         timeout: int = 60,
     ) -> AsyncIterator[str]:
-        """
-        Stream text chunks from Gemini.
-        Note: JSON mode (response_mime_type) is not supported for streaming requests.
-        Use chat_completion if you need a JSON response.
-        """
+
         system_instruction, history, last_user = _build_gemini_history(
             messages, json_requested=False
         )
-        model   = _build_model(self._model_name, system_instruction)
+
+        model = _build_model(self._model_name, system_instruction)
         gen_cfg = _build_generation_config(
-            temperature, max_tokens, json_requested=False, model_name=self._model_name,
+            temperature, max_tokens, False, self._model_name
         )
 
         def _run_stream():
@@ -398,18 +530,9 @@ class AsyncLLMService(LLMService):
                 stream=True,
             )
 
-        try:
-            stream = await asyncio.to_thread(_run_stream)
-        except Exception as exc:
-            logger.error("Gemini stream setup failed: %s", exc, exc_info=True)
-            raise
+        stream = await asyncio.to_thread(_run_stream)
 
         for chunk in stream:
-            try:
-                if chunk.text:
-                    yield chunk.text
-            except (ValueError, AttributeError):
-                candidate = (chunk.candidates[0] if getattr(chunk, "candidates", None) else None)
-                if candidate and getattr(candidate, "finish_reason", None) in _ACCEPTABLE_FINISH_REASONS:
-                    continue
-                logger.debug("Skipping chunk with no text.")
+            if getattr(chunk, "text", None):
+                yield chunk.text
+         

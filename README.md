@@ -32,33 +32,51 @@ TerraformCloudAgent is a **README-driven, conversational infrastructure generato
 
 ### Supported Cloud Providers
 
+<<<<<<< HEAD
 | Provider               | Compute          | Networking                   | IAM                                     |
 | ---------------------- | ---------------- | ---------------------------- | --------------------------------------- |
 | **AWS**          | EC2              | VPC, Subnets, IGW, SGs       | IAM Roles (10 types), Instance Profiles |
 | **GCP**          | Compute Engine   | VPC, Subnets, Firewall Rules | Service Accounts                        |
 | **Azure**        | Virtual Machines | VNet, Subnets, NSGs          | Managed Identity                        |
 | **DigitalOcean** | Droplets         | Firewall                     | SSH Keys                                |
+=======
+| Provider | Compute | Networking | IAM |
+|---|---|---|---|
+| **AWS** | EC2 | VPC, Subnets, IGW, SGs | IAM Roles (10 types), Instance Profiles |
+| **GCP** | Compute Engine | VPC, Subnets, Firewall Rules | Service Accounts |
+| **Azure** | Virtual Machines | VNet, Subnets, NSGs | Managed Identity |
+| **DigitalOcean** | Droplets | Firewall | SSH Keys |
+>>>>>>> origin-n/feature/backend-update
 
 ---
 
 ## ✨ Key Features
 
 ### 🤖 Intelligent Conversation System
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin-n/feature/backend-update
 - **README-First Analysis**: Detects languages, frameworks, databases, ports, and dependencies automatically
 - **Environment-Aware Questioning**: Dev (4–6 questions, cost-focused) vs Production (10–12 questions, reliability-focused)
 - **Streaming Responses**: Real-time token streaming via Server-Sent Events
 - **Turn Guidance System**: AI knows exactly which question to ask next based on conversation state
 
 ### 🔐 Authentication & User Management
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin-n/feature/backend-update
 - **Firebase Authentication**: Email/password sign-up and sign-in
 - **Google OAuth**: One-click "Continue with Google" via Firebase SDK popup
 - **MongoDB User Sync**: Every login (email or Google) upserts a user record in the `users` collection
 - **Protected API**: All endpoints require a valid Firebase Bearer token
 
 ### 🏗️ Production-Grade Code Generation
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin-n/feature/backend-update
 - **Three Terraform Files**: `main.tf`, `variables.tf`, `outputs.tf`
 - **GitHub Actions CI/CD**: Auto-generated `deploy.yml` for each cloud provider
 - **User Data Scripts**: Clones your GitHub repo, installs dependencies, starts the app
@@ -66,19 +84,28 @@ TerraformCloudAgent is a **README-driven, conversational infrastructure generato
 - **Terraform Validation**: Runs `terraform fmt` and `terraform validate` on generated code
 
 ### ✏️ Edit & Update Terraform Files
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin-n/feature/backend-update
 - **Inline Editor**: Click Edit on any file in the File Review tab to edit it directly in the browser
 - **Save Changes**: Writes edited files back to disk via `POST /runs/{id}/files`
 - **AI Re-generation**: Describe changes in natural language → AI regenerates all files via `POST /runs/{id}/edit`
 
 ### 📧 Email Approval Workflow
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin-n/feature/backend-update
 - Send Terraform files to any email for remote review before deployment
 - Secure, action-specific approval/rejection tokens (no token reuse)
 - HTML email with syntax-highlighted Terraform code
 
 ### 📊 Observability
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin-n/feature/backend-update
 - **Langfuse Integration**: LLM call tracing and token usage tracking
 - **Structured Logging**: Per-session and per-run log files
 - **MongoDB Persistence**: Conversations, sessions, and user records survive restarts
@@ -200,13 +227,17 @@ GITHUB_TOKEN=ghp_...
 ## 🔄 How It Works
 
 ### Phase 1: README Analysis
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin-n/feature/backend-update
 1. User provides GitHub owner, repo, optional token (private repos), and optional branch
 2. `GithubService` fetches the README via GitHub API
 3. `LLMService` analyzes it: extracts language, framework, database, ports, dependencies
 4. Bot greets the user with a summary of what it found
 
 ### Phase 2: Intelligent Questioning
+<<<<<<< HEAD
 
 Questions follow a **strict mandatory order**:
 
@@ -222,6 +253,20 @@ Questions follow a **strict mandatory order**:
 
 `LLMGenerator` creates:
 
+=======
+Questions follow a **strict mandatory order**:
+
+| Step | All Deployments | Dev Only | Prod Only |
+|---|---|---|---|
+| 1 | Cloud Provider | | |
+| 2 | Environment | | |
+| 3 | Region | ✓ (cheapest) | ✓ (latency/compliance) |
+| 4 | | Basic instance | Traffic estimation |
+| 5–12 | | | HA, storage, IAM, monitoring, backup, security |
+
+### Phase 3: Code Generation
+`LLMGenerator` creates:
+>>>>>>> origin-n/feature/backend-update
 - **`main.tf`** — VPC, instances, security groups, IAM, load balancers
 - **`variables.tf`** — All configurable parameters with descriptions and defaults
 - **`outputs.tf`** — IPs, URLs, connection strings
@@ -230,17 +275,25 @@ Questions follow a **strict mandatory order**:
 Then runs `terraform fmt` + `terraform validate` automatically.
 
 ### Phase 4: Review & Edit
+<<<<<<< HEAD
 
 In the **File Review** tab:
 
+=======
+In the **File Review** tab:
+>>>>>>> origin-n/feature/backend-update
 - **Inline editing**: Click Edit on any file, modify in textarea, click Save
 - **AI re-generation**: Type natural language feedback → AI rewrites all files
 - **Download**: Download any file individually
 
 ### Phase 5: Deployment
+<<<<<<< HEAD
 
 In the **Lifecycle** tab:
 
+=======
+In the **Lifecycle** tab:
+>>>>>>> origin-n/feature/backend-update
 - **Approve & Deploy**: Runs `terraform apply -auto-approve` in background
 - **Request Remote Approval**: Sends HTML email with Terraform files and approve/reject links
 - **Reject Plan**: Marks run as rejected
@@ -252,6 +305,7 @@ In the **Lifecycle** tab:
 
 ### Auth / User
 
+<<<<<<< HEAD
 | Method   | Endpoint            | Description                                            |
 | -------- | ------------------- | ------------------------------------------------------ |
 | `POST` | `/auth/sync-user` | Upsert Firebase user into MongoDB `users` collection |
@@ -290,11 +344,55 @@ In the **Lifecycle** tab:
 | `POST` | `/feedback`                | Submit LLM feedback          |
 | `GET`  | `/runs/{id}/approve-email` | Email approval link handler  |
 | `GET`  | `/runs/{id}/reject-email`  | Email rejection link handler |
+=======
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/auth/sync-user` | Upsert Firebase user into MongoDB `users` collection |
+| `GET` | `/auth/me` | Get current user's MongoDB profile |
+
+### Conversations
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/conversations` | Start a new README-driven conversation |
+| `POST` | `/conversations/{id}/message` | Send a message (non-streaming) |
+| `POST` | `/conversations/{id}/message/stream` | Send a message (SSE streaming) |
+| `GET` | `/conversations/{id}` | Get conversation details |
+| `POST` | `/conversations/{id}/generate` | Manually trigger Terraform generation |
+| `GET` | `/sessions` | List all sessions |
+| `DELETE` | `/sessions/{id}` | Delete a session |
+
+### Runs
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/runs/{id}` | Get run status and details |
+| `GET` | `/runs/{id}/files` | Get generated Terraform files |
+| `POST` | `/runs/{id}/files` | Save manually edited files + re-validate |
+| `POST` | `/runs/{id}/edit` | AI re-generation with natural language feedback |
+| `POST` | `/runs/{id}/approve` | Approve and deploy (async) |
+| `POST` | `/runs/{id}/reject` | Reject the plan |
+| `POST` | `/runs/{id}/destroy` | Destroy deployed infrastructure (async) |
+| `POST` | `/runs/{id}/send-for-approval` | Send approval email |
+
+### Other
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/health` | Health check |
+| `POST` | `/feedback` | Submit LLM feedback |
+| `GET` | `/runs/{id}/approve-email` | Email approval link handler |
+| `GET` | `/runs/{id}/reject-email` | Email rejection link handler |
+>>>>>>> origin-n/feature/backend-update
 
 ---
 
 ## 📁 Project Structure
 
+<<<<<<< HEAD
+=======
+```
+>>>>>>> origin-n/feature/backend-update
 TerraformCloudAgent/
 ├── app/
 │   ├── core/
@@ -316,8 +414,11 @@ TerraformCloudAgent/
 │   │   ├── run_manager.py           # Run state & workspace management
 │   │   ├── user_service.py          # MongoDB user upsert (auth sync)
 │   │   ├── email_service.py         # SMTP approval emails
+<<<<<<< HEAD
 │   │   ├── langfuse_service.py      # langfuse integration
 │   │   ├── workspace_manager.py   
+=======
+>>>>>>> origin-n/feature/backend-update
 │   │   └── service_templates.py     # Provider-specific Terraform snippets
 │   │
 │   └── main.py                      # FastAPI application & all routes
@@ -352,13 +453,20 @@ TerraformCloudAgent/
 ├── logs/                            # Application logs
 ├── requirements.txt
 └── .env                             # Environment variables (not committed)
+<<<<<<< HEAD
+=======
+```
+>>>>>>> origin-n/feature/backend-update
 
 ---
 
 ## 🐛 Troubleshooting
 
 **MongoDB connection failed**
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin-n/feature/backend-update
 ```bash
 # Local MongoDB
 mongod --dbpath ./data/db
@@ -368,18 +476,27 @@ docker run -d -p 27017:27017 mongo:latest
 ```
 
 **Firebase auth errors**
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin-n/feature/backend-update
 - Ensure `FIREBASE_PROJECT_ID` and `FIREBASE_CREDENTIALS_PATH` are set correctly
 - The service account JSON file must be accessible at the configured path
 - For Google OAuth, ensure the Firebase project has Google as a sign-in provider
 
 **GitHub rate limit / private repo 404**
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin-n/feature/backend-update
 - Set `GITHUB_TOKEN` in `.env` or pass it in the UI's "GitHub Token" field
 - For private repos, use a token with `repo` scope
 
 **Terraform not found**
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin-n/feature/backend-update
 ```bash
 # Verify installation
 terraform --version
@@ -388,7 +505,10 @@ terraform --version
 ```
 
 **Terraform validate fails after edit**
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin-n/feature/backend-update
 - The backend automatically re-runs `terraform fmt` + `terraform validate` after file saves
 - Check `logs/` for detailed error output
 

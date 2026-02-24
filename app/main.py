@@ -1,4 +1,4 @@
-"""app/main.py — TerraBot FastAPI entry point (GCP-only, interactive workflow)."""
+"""app/main.py — TerraBot FastAPI entry point (AWS-only, interactive workflow)."""
 from __future__ import annotations
 
 import asyncio
@@ -22,7 +22,6 @@ from app.models.schemas import (
 )
 from app.models.conversation_schemas import (
     ConversationCreateResponse, ChatMessage, ChatMessageResponse,
-    FeedbackRequest,
 )
 from app.services.run_manager import RunManager
 from app.services.workflow_engine import WorkflowEngine
@@ -42,7 +41,7 @@ conversation_manager = ConversationManager()
 
 redis_client: Optional[redis.Redis] = None
 
-logger.info("Starting %s v%s (GCP-only mode)", config.APP_NAME, config.APP_VERSION)
+logger.info("Starting %s v%s (AWS Free Tier mode)", config.APP_NAME, config.APP_VERSION)
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -50,17 +49,50 @@ logger.info("Starting %s v%s (GCP-only mode)", config.APP_NAME, config.APP_VERSI
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global redis_client
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
+
+    # ── Redis ─────────────────────────────────────────────────────────────
     try:
-        redis_client = redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
-        await redis_client.ping()
-        logger.info("Connected to Redis at %s", redis_url)
+        redis_url = getattr(config, "REDIS_URL", None) or os.getenv("REDIS_URL")
+        if redis_url:
+            redis_client = redis.from_url(redis_url, decode_responses=True)
+            await redis_client.ping()
+            logger.info("Redis connected: %s", redis_url)
+        else:
+            logger.warning("REDIS_URL not set — rate limiting disabled.")
     except Exception as e:
-        logger.warning("Redis unavailable: %s — rate limiting bypassed.", e)
+        logger.warning("Redis connection failed (%s) — rate limiting disabled.", e)
         redis_client = None
+
+    # ── MCP Servers ───────────────────────────────────────────────────────
+    from app.services.mcp_service import mcp_manager
+    mcp_servers = {}
+    if config.ENABLE_AWS_MCP:
+        mcp_servers["aws"] = config.AWS_MCP_SERVER
+    if config.ENABLE_TERRAFORM_MCP:
+        mcp_servers["terraform"] = config.TERRAFORM_MCP_SERVER
+
+    if mcp_servers:
+        try:
+            await mcp_manager.initialize_all(mcp_servers)
+            logger.info("MCP servers initialized: %s", list(mcp_servers.keys()))
+        except Exception as e:
+            # Non-fatal — app still works without MCP
+            logger.error("MCP server initialization failed: %s — continuing without MCP.", e)
+
     yield
+
+    # ── Shutdown ──────────────────────────────────────────────────────────
     if redis_client:
         await redis_client.close()
+        logger.info("Redis connection closed.")
+
+    # FIX: Only close MCP here — removed duplicate @app.on_event("shutdown")
+    try:
+        await mcp_manager.close_all()
+        logger.info("MCP sessions closed.")
+    except Exception as e:
+        logger.warning("Error closing MCP sessions: %s", e)
+
     logger.info("Application shutting down.")
 
 
@@ -68,7 +100,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=config.APP_NAME,
-    description=config.APP_DESCRIPTION + " — GCP Interactive Workflow",
+    description=config.APP_DESCRIPTION + " — AWS Interactive Workflow",
     version=config.APP_VERSION,
     docs_url="/docs",
     lifespan=lifespan,
@@ -95,18 +127,10 @@ def _rate_id(user: Optional[Dict], x_user_id: Optional[str]) -> str:
     return x_user_id or "anonymous"
 
 
-def _get_run_or_404(run_id: str):
-    """DRY helper: fetch a run or raise 404."""
-    run = run_manager.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    return run
-
-
 def _build_agent_request(terraform_params: dict) -> AgentRequest:
     return AgentRequest(
         request=terraform_params,
-        provider="gcp",
+        provider="aws",
         auto_approve=False,
     )
 
@@ -139,7 +163,7 @@ async def root():
     return {
         "app":     config.APP_NAME,
         "version": config.APP_VERSION,
-        "provider": "GCP",
+        "provider": "AWS",
         "conversation_workflow": {
             "1_start":   "POST /conversations?owner=<>&repo=<>",
             "2_chat":    "POST /conversations/{id}/message  (repeat until is_complete=true)",
@@ -157,8 +181,11 @@ async def health_check():
     return {
         "status":        "healthy",
         "version":       config.APP_VERSION,
-        "provider":      "gcp",
+        "provider":      "aws",
         "auth_required": config.REQUIRE_AUTH,
+        "redis":         redis_client is not None,
+        "mcp_terraform": config.ENABLE_TERRAFORM_MCP,
+        "mcp_aws":       config.ENABLE_AWS_MCP,
     }
 
 
@@ -253,10 +280,6 @@ async def stream_message(
     chat_message: ChatMessage,
     user: Optional[Dict] = Depends(get_current_user),
 ):
-    """
-    Stream bot response via SSE. Delegates all LLM logic to process_message,
-    then streams the returned text character by character.
-    """
     import json
 
     async def generate():
@@ -278,14 +301,12 @@ async def stream_message(
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
             return
 
-        # Stream the bot response text in chunks
         text = response.bot_response or ""
         chunk_size = 20
         for i in range(0, len(text), chunk_size):
             yield f"data: {json.dumps({'content': text[i:i + chunk_size]})}\n\n"
             await asyncio.sleep(0.01)
 
-        # Auto-generate Terraform if conversation just completed
         run_id = None
         if response.is_complete:
             try:
@@ -354,16 +375,18 @@ async def get_conversation(
 
 
 @app.get("/conversations")
-async def list_conversations(
-    limit: int = 20,
-    user: Optional[Dict] = Depends(get_current_user),
-    x_user_id: Optional[str] = Header(None),
-):
-    await check_rate_limit(_rate_id(user, x_user_id), redis_client)
+async def list_conversations(limit: int = 20, x_user_id: Optional[str] = Header(None)):
+    await check_rate_limit(x_user_id or "anonymous", redis_client)
     return conversation_manager.list_sessions(limit=limit)
 
 
-# /sessions is removed — was a duplicate of /conversations
+@app.get("/sessions")
+async def list_sessions(limit: int = 20, user: Optional[Dict] = Depends(get_current_user)):
+    try:
+        return conversation_manager.list_sessions(limit=limit)
+    except Exception as e:
+        logger.error("list_sessions failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/sessions/{session_id}")
@@ -407,10 +430,10 @@ async def create_run(
     x_user_id: Optional[str] = Header(None),
 ):
     await check_rate_limit(x_user_id or "anonymous", redis_client)
-    request.provider = "gcp"
+    request.provider = "aws"
     try:
         run = run_manager.create_run(request)
-        logger.info("[%s] Created GCP run", run.run_id)
+        logger.info("[%s] Created AWS run", run.run_id)
         background_tasks.add_task(workflow_engine.execute_planning_phase, run.run_id, request)
         return run
     except Exception as e:
@@ -420,7 +443,10 @@ async def create_run(
 
 @app.get("/runs/{run_id}", response_model=RunResponse)
 async def get_run(run_id: str):
-    return _get_run_or_404(run_id)
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return run
 
 
 @app.post("/runs/{run_id}/chat", response_model=ChatResponse)
@@ -429,7 +455,9 @@ async def chat_about_run(
     chat_request: ChatRequest,
     x_user_id: Optional[str] = Header(None),
 ):
-    run = _get_run_or_404(run_id)
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     if run.status not in [RunStatus.PLANNED, RunStatus.REVIEWING]:
         raise HTTPException(status_code=400, detail=f"Chat not available in status: {run.status}")
 
@@ -440,7 +468,7 @@ async def chat_about_run(
 
     try:
         context = (
-            f"Explain the Terraform plan briefly using GCP terminology.\n\n"
+            f"Explain the Terraform plan briefly using AWS terminology.\n\n"
             f"PLAN:\n{run.plan_output or 'Not available'}\n\n"
             f"QUESTION: {chat_request.message}"
         )
@@ -458,7 +486,9 @@ async def edit_run(
     background_tasks: BackgroundTasks,
     x_user_id: Optional[str] = Header(None),
 ):
-    run = _get_run_or_404(run_id)
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     if run.status not in [RunStatus.PLANNED, RunStatus.REVIEWING]:
         raise HTTPException(status_code=400, detail=f"Cannot edit run in status: {run.status}")
 
@@ -473,7 +503,9 @@ async def edit_run(
 
 @app.get("/runs/{run_id}/files")
 async def get_run_files(run_id: str):
-    run = _get_run_or_404(run_id)
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     try:
         workspace = run_manager.get_workspace_path(run_id)
         files = {}
@@ -489,7 +521,9 @@ async def get_run_files(run_id: str):
 
 @app.post("/runs/{run_id}/files", response_model=RunResponse)
 async def edit_run_files(run_id: str, files: dict, background_tasks: BackgroundTasks):
-    run = _get_run_or_404(run_id)
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     if run.status not in [RunStatus.PLANNED, RunStatus.REVIEWING]:
         raise HTTPException(status_code=400, detail=f"Cannot edit files in status: {run.status}")
     if "main_tf" not in files:
@@ -501,13 +535,16 @@ async def edit_run_files(run_id: str, files: dict, background_tasks: BackgroundT
             (workspace / fname).write_text(files[key], encoding="utf-8")
 
     run = run_manager.update_run_status(run_id, RunStatus.PLANNING)
-    background_tasks.add_task(workflow_engine.revalidate_and_replan, run_id, "gcp")
+    # revalidate_and_replan now re-sanitizes before planning
+    background_tasks.add_task(workflow_engine.revalidate_and_replan, run_id, "aws")
     return run
 
 
 @app.post("/runs/{run_id}/approve", response_model=RunResponse)
 async def approve_run(run_id: str, background_tasks: BackgroundTasks):
-    run = _get_run_or_404(run_id)
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     if run.status not in [RunStatus.PLANNED, RunStatus.REVIEWING]:
         raise HTTPException(status_code=400, detail=f"Cannot approve run in status: {run.status}")
 
@@ -519,7 +556,9 @@ async def approve_run(run_id: str, background_tasks: BackgroundTasks):
 
 @app.post("/runs/{run_id}/reject", response_model=RunResponse)
 async def reject_run(run_id: str):
-    run = _get_run_or_404(run_id)
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     if run.status in [RunStatus.COMPLETED, RunStatus.FAILED]:
         raise HTTPException(status_code=400, detail=f"Cannot reject run in status: {run.status}")
 
@@ -530,12 +569,32 @@ async def reject_run(run_id: str):
 
 @app.post("/runs/{run_id}/destroy", response_model=RunResponse)
 async def destroy_run(run_id: str, background_tasks: BackgroundTasks):
-    run = _get_run_or_404(run_id)
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     if run.status != RunStatus.COMPLETED:
         raise HTTPException(status_code=400, detail="Can only destroy COMPLETED runs.")
 
     background_tasks.add_task(workflow_engine.execute_destroy_phase, run_id)
     return run_manager.update_run_status(run_id, RunStatus.DESTROYING)
+
+
+@app.post("/runs/{run_id}/redeploy", response_model=RunResponse)
+async def redeploy_run(run_id: str, background_tasks: BackgroundTasks):
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    if run.status not in [RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.DESTROYED, RunStatus.REJECTED]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot redeploy run in status: {run.status}. Use 'Approve' if the run is still in review."
+        )
+
+    run = run_manager.update_run_status(run_id, RunStatus.APPROVED)
+    logger.info("[%s] Redeploy triggered", run_id)
+    background_tasks.add_task(workflow_engine.execute_apply_phase, run_id)
+    return run
 
 
 # ── Email approval workflow ───────────────────────────────────────────────────

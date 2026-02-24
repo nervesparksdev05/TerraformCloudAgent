@@ -1,11 +1,9 @@
-"""
-Workspace management for Terraform runs
-"""
+"""workspace_manager.py — TerraBot: Filesystem management for Terraform workspaces."""
+from __future__ import annotations
+
 import json
-import shutil
 from pathlib import Path
-from datetime import datetime
-from typing import Tuple
+from typing import Any, Dict, Optional
 
 from app.core import config
 from app.core.logger import get_logger
@@ -15,117 +13,132 @@ logger = get_logger(__name__)
 
 
 class WorkspaceManager:
-    """Manages isolated workspaces for Terraform runs"""
-    
-    def __init__(self, base_dir: str = "runs"):
-        self.base_dir = Path(base_dir)
-        self.base_dir.mkdir(exist_ok=True)
-        logger.info(f"Workspace manager initialized: {self.base_dir.absolute()}")
-    
-    def create_run_workspace(self) -> Tuple[str, Path]:
-        """
-        Create a new isolated workspace for a run
-        
-        Returns:
-            Tuple of (run_id, workspace_path)
-        """
-        # Generate unique run ID
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_id = f"run_{timestamp}"
-        
-        # Create workspace directory
-        workspace_path = self.base_dir / run_id
-        workspace_path.mkdir(parents=True, exist_ok=True)
-        
-        logger.info(f"Created workspace: {run_id}")
-        return run_id, workspace_path
-    
+    """
+    Manages the on-disk workspace for each Terraform run.
+
+    Defense-in-depth: write_terraform_files() always calls _sanitize_bundle
+    before writing, so even if sanitization was somehow skipped during
+    generation or after a manual file edit, the sanitizer runs one final
+    time before any file hits disk.
+    """
+
+    # ── Read ──────────────────────────────────────────────────────────────────
+
+    def read_terraform_files(self, workspace_path: Path) -> Dict[str, str]:
+        """Read all .tf files from workspace. Returns {} if path doesn't exist."""
+        files: Dict[str, str] = {}
+        if not workspace_path or not workspace_path.exists():
+            logger.warning("workspace_path does not exist: %s", workspace_path)
+            return files
+
+        for fname, key in [
+            ("main.tf",      "main_tf"),
+            ("variables.tf", "variables_tf"),
+            ("outputs.tf",   "outputs_tf"),
+        ]:
+            p = workspace_path / fname
+            if p.exists():
+                try:
+                    files[key] = p.read_text(encoding="utf-8")
+                except Exception as e:
+                    logger.error("Failed to read %s: %s", p, e)
+
+        return files
+
+    # ── Write ─────────────────────────────────────────────────────────────────
+
     def write_terraform_files(self, workspace_path: Path, bundle: TerraformBundle) -> None:
         """
-        Write Terraform files to workspace
-        
-        Args:
-            workspace_path: Path to workspace directory
-            bundle: TerraformBundle containing the code
-        """
-        files = {
-            "main.tf": bundle.main_tf,
-            "variables.tf": bundle.variables_tf,
-            "outputs.tf": bundle.outputs_tf
-        }
-        
-        for filename, content in files.items():
-            file_path = workspace_path / filename
-            file_path.write_text(content, encoding="utf-8")
-            logger.debug(f"Wrote {filename} ({len(content)} bytes)")
+        Write Terraform files to disk.
 
-        # Handle CI/CD workflow
-        if bundle.github_workflow_yaml:
-            workflow_path = workspace_path / ".github" / "workflows"
-            workflow_path.mkdir(parents=True, exist_ok=True)
-            (workflow_path / "deploy.yml").write_text(bundle.github_workflow_yaml, encoding="utf-8")
-            logger.debug(f"Wrote .github/workflows/deploy.yml ({len(bundle.github_workflow_yaml)} bytes)")
-    
-    def read_terraform_files(self, workspace_path: Path) -> dict:
+        Defense-in-depth: sanitize_bundle is called here as the LAST line of
+        defense before any .tf file is persisted, regardless of where the bundle
+        came from (initial generation, LLM refine, or manual user edit via API).
         """
-        Read Terraform files from workspace
-        
-        Args:
-            workspace_path: Path to workspace directory
-            
-        Returns:
-            Dictionary with main.tf, variables.tf, outputs.tf content
-        """
-        files = ["main.tf", "variables.tf", "outputs.tf"]
-        content = {}
-        
+        if not workspace_path:
+            raise ValueError("workspace_path is required")
+
+        workspace_path.mkdir(parents=True, exist_ok=True)
+
+        # Final sanitization pass — catches any REPLACE_ME / bad patterns
+        # that slipped through earlier stages or were introduced by user edits
         try:
-            for filename in files:
-                file_path = workspace_path / filename
-                if file_path.exists():
-                    content[filename] = file_path.read_text(encoding="utf-8")
-                else:
-                    content[filename] = ""
-            return content
+            from app.services.llm_generator import LLMGenerator
+            bundle = LLMGenerator._sanitize_bundle(bundle)
+            logger.debug("workspace_manager: _sanitize_bundle applied before write")
         except Exception as e:
-            logger.error(f"Error reading terraform files: {str(e)}")
-            return {}
-    
-    def write_request_json(self, workspace_path: Path, request: AgentRequest) -> None:
-        """
-        Write original request to workspace for reference
-        
-        Args:
-            workspace_path: Path to workspace directory
-            request: Original user request
-        """
-        request_file = workspace_path / "request.json"
-        request_data = {
-            "request": request.request,
-            "provider": request.provider,
-            "auto_approve": request.auto_approve,
-            "timestamp": datetime.now().isoformat()
+            # Never block a write due to sanitizer failure — log and continue
+            logger.warning("workspace_manager: _sanitize_bundle failed (%s) — writing unsanitized bundle", e)
+
+        file_map = {
+            "main.tf":      bundle.main_tf,
+            "variables.tf": bundle.variables_tf,
+            "outputs.tf":   bundle.outputs_tf,
         }
-        request_file.write_text(json.dumps(request_data, indent=2), encoding="utf-8")
-        logger.debug("Wrote request.json")
-    
-    def get_log_path(self, workspace_path: Path) -> Path:
-        """Get path for Terraform execution logs"""
-        return workspace_path / "terraform.log"
-    
-    def cleanup_workspace(self, workspace_path: Path) -> None:
-        """
-        Delete a workspace directory
-        
-        Args:
-            workspace_path: Path to workspace to delete
-        """
-        if workspace_path.exists():
-            shutil.rmtree(workspace_path)
-            logger.info(f"Cleaned up workspace: {workspace_path.name}")
-    
-    def list_workspaces(self) -> list:
-        """List all workspace directories"""
-        if not self.base_dir.exists():
-            return []
-        return [d.name for d in self.base_dir.iterdir() if d.is_dir()]
+        for fname, content in file_map.items():
+            if content:
+                p = workspace_path / fname
+                try:
+                    p.write_text(content, encoding="utf-8")
+                    logger.debug("Wrote %s (%d bytes)", p, len(content))
+                except Exception as e:
+                    logger.error("Failed to write %s: %s", p, e)
+                    raise
+
+        # Optional: GitHub Actions workflow
+        if bundle.github_workflow_yaml:
+            gha_dir = workspace_path / ".github" / "workflows"
+            gha_dir.mkdir(parents=True, exist_ok=True)
+            gha_file = gha_dir / "deploy.yml"
+            try:
+                gha_file.write_text(bundle.github_workflow_yaml, encoding="utf-8")
+                logger.debug("Wrote GitHub Actions workflow to %s", gha_file)
+            except Exception as e:
+                logger.warning("Failed to write GitHub Actions workflow: %s", e)
+
+    def write_request_json(self, workspace_path: Path, request: AgentRequest) -> None:
+        """Persist the original AgentRequest so it can be reloaded later."""
+        workspace_path.mkdir(parents=True, exist_ok=True)
+        p = workspace_path / "request.json"
+        try:
+            data = {
+                "request":      request.request,
+                "provider":     getattr(request, "provider", "aws"),
+                "auto_approve": getattr(request, "auto_approve", False),
+            }
+            p.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+            logger.debug("Wrote request.json to %s", p)
+        except Exception as e:
+            logger.error("Failed to write request.json: %s", e)
+            raise
+
+    def read_request_json(self, workspace_path: Path) -> Optional[Dict[str, Any]]:
+        """Read back the persisted AgentRequest dict. Returns None if not found."""
+        p = workspace_path / "request.json"
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.error("Failed to read request.json from %s: %s", workspace_path, e)
+            return None
+
+    def workspace_exists(self, workspace_path: Path) -> bool:
+        return workspace_path is not None and workspace_path.exists()
+
+    def clean_workspace(self, workspace_path: Path) -> None:
+        """Remove all .tf files and state from a workspace (used before re-generation)."""
+        if not workspace_path or not workspace_path.exists():
+            return
+        for pattern in ("*.tf", "*.tfvars", "*.tfvars.json", "tfplan", ".terraform.lock.hcl"):
+            for f in workspace_path.glob(pattern):
+                try:
+                    f.unlink()
+                    logger.debug("Removed %s", f)
+                except Exception as e:
+                    logger.warning("Could not remove %s: %s", f, e)
+
+    def get_workspace_size_bytes(self, workspace_path: Path) -> int:
+        if not workspace_path or not workspace_path.exists():
+            return 0
+        return sum(f.stat().st_size for f in workspace_path.rglob("*") if f.is_file())

@@ -1,0 +1,14 @@
+app/main.py
+app/models/conversation_schemas.py
+app/services/conversation_manager.py
+app/services/llm_generator.py
+app/services/llm_service.py
+app/services/workflow_engine.py
+app/services/workspace_manager.py
+frontend/package-lock.json
+frontend/package.json
+frontend/src/components/features/chat/ChatMessage.jsx
+frontend/src/components/features/chat/ChatPanel.jsx
+frontend/src/pages/WorkspacePage.jsx
+frontend/src/services/client.js
+requirements.txt

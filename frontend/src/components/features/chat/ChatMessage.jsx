@@ -120,7 +120,7 @@ export const ChatMessage = ({ message, onSuggestionClick, sessionId }) => {
             {message.content}
           </ReactMarkdown>
         )}
-
+        
         {/* Streaming indicator */}
         {message.isStreaming && (
           <span className="inline-block w-2 h-4 bg-purple-500 ml-1 animate-pulse"></span>
