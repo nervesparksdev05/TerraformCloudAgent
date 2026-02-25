@@ -50,7 +50,6 @@ def _init_client():
 
 def get_client():
     """Return the singleton Langfuse client (or None)."""
-    global _langfuse_client
     if _langfuse_client is None:
         _init_client()
     return _langfuse_client

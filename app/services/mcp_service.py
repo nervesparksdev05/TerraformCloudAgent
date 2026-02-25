@@ -17,8 +17,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp import ClientSession
+from mcp.client.sse import sse_client
 
 from app.core import config
 from app.core.logger import get_logger
@@ -97,34 +97,11 @@ class MCPManager:
             from contextlib import AsyncExitStack
             stack = AsyncExitStack()
             try:
-                # Parse command line for npx or direct executable
-                parts = command_line.split()
-                executable = parts[0]
-                args = parts[1:]
-
-                import os as _os
-                # Inherit all env vars and explicitly ensure AWS credentials are passed to the subprocess
-                _child_env = {**_os.environ}
-                # Ensure AWS SDK env vars are present (from config)
-                for _key in (
-                    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
-                    "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_SESSION_TOKEN",
-                ):
-                    _val = _os.getenv(_key)
-                    if _val:
-                        _child_env[_key] = _val
-                # AWS_DEFAULT_REGION fallback
-                if "AWS_DEFAULT_REGION" not in _child_env and "AWS_REGION" in _child_env:
-                    _child_env["AWS_DEFAULT_REGION"] = _child_env["AWS_REGION"]
-
-                server_params = StdioServerParameters(
-                    command=executable,
-                    args=args,
-                    env=_child_env
-                )
+                # Connect to Docker service via SSE
+                url = "http://mcp:8080/sse" if config.DEPLOYMENT_MODE != "development" else "http://localhost:8080/sse"
 
                 # Enter transport context
-                read, write = await stack.enter_async_context(stdio_client(server_params))
+                read, write = await stack.enter_async_context(sse_client(url))
                 
                 # Enter session context
                 session = ClientSession(read, write)
@@ -340,13 +317,9 @@ class MCPManager:
             input=prompt
         )
 
-        server_params = StdioServerParameters(
-            command="docker",
-            args=["run", "-i", "--rm", "hashicorp/terraform-mcp-server", "--toolsets=registry"],
-        )
-
         try:
-            async with stdio_client(server_params) as (read, write):
+            url = "http://mcp:8080/sse" if config.DEPLOYMENT_MODE != "development" else "http://localhost:8080/sse"
+            async with sse_client(url) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     tools_response = await session.list_tools()

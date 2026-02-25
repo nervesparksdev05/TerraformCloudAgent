@@ -36,7 +36,9 @@ class RunManager:
             status=RunStatus.CREATED,
             provider=request.provider,
             log_path=str(workspace_path.absolute()),
-            outputs=None
+            outputs=None,
+            approval_info=None,
+            metadata=None
         )
         
         # Save request and initial state

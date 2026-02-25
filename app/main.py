@@ -30,11 +30,11 @@ from app.services.conversation_manager import ConversationManager
 from app.services.email_service import email_service
 from app.services.user_service import user_service
 
-setup_logging(log_dir=config.LOGS_DIR, log_level="DEBUG" if config.DEBUG else "INFO")
+setup_logging(log_dir=str(config.LOGS_DIR), log_level="DEBUG" if config.DEBUG else "INFO")
 logger = get_logger(__name__)
 
 # ── Service singletons ────────────────────────────────────────────────────────
-run_manager          = RunManager(base_dir=config.WORKSPACE_BASE_DIR)
+run_manager          = RunManager(base_dir=str(config.WORKSPACE_BASE_DIR))
 workflow_engine      = WorkflowEngine()
 llm_generator        = LLMGenerator()
 conversation_manager = ConversationManager()
@@ -227,7 +227,8 @@ async def create_conversation(
     if not owner.strip() or not repo.strip():
         raise HTTPException(status_code=400, detail="owner and repo are required.")
 
-    await check_rate_limit(_rate_id(user, x_user_id), redis_client)
+    if redis_client:
+        await check_rate_limit(_rate_id(user, x_user_id), redis_client)
 
     try:
         result = await conversation_manager.create_session(
@@ -252,7 +253,8 @@ async def send_message(
     user: Optional[Dict] = Depends(get_current_user),
     x_user_id: Optional[str] = Header(None),
 ):
-    await check_rate_limit(_rate_id(user, x_user_id), redis_client)
+    if redis_client:
+        await check_rate_limit(_rate_id(user, x_user_id), redis_client)
 
     if not conversation_manager.get_session(session_id):
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
@@ -337,7 +339,8 @@ async def submit_feedback(
     user: Optional[Dict] = Depends(get_current_user),
     x_user_id: Optional[str] = Header(None),
 ):
-    await check_rate_limit(_rate_id(user, x_user_id), redis_client)
+    if redis_client:
+        await check_rate_limit(_rate_id(user, x_user_id), redis_client)
 
     session = conversation_manager.get_session(session_id)
     if not session:
@@ -390,7 +393,8 @@ async def get_conversation(
 
 @app.get("/conversations")
 async def list_conversations(limit: int = 20, x_user_id: Optional[str] = Header(None)):
-    await check_rate_limit(x_user_id or "anonymous", redis_client)
+    if redis_client:
+        await check_rate_limit(x_user_id or "anonymous", redis_client)
     return conversation_manager.list_sessions(limit=limit)
 
 
@@ -443,7 +447,8 @@ async def create_run(
     background_tasks: BackgroundTasks,
     x_user_id: Optional[str] = Header(None),
 ):
-    await check_rate_limit(x_user_id or "anonymous", redis_client)
+    if redis_client:
+        await check_rate_limit(x_user_id or "anonymous", redis_client)
     request.provider = "aws"
     try:
         run = run_manager.create_run(request)
@@ -478,7 +483,8 @@ async def chat_about_run(
     if run.status == RunStatus.PLANNED:
         run_manager.update_run_status(run_id, RunStatus.REVIEWING)
 
-    await check_rate_limit(x_user_id or "anonymous", redis_client)
+    if redis_client:
+        await check_rate_limit(x_user_id or "anonymous", redis_client)
 
     try:
         context = (
@@ -506,7 +512,8 @@ async def edit_run(
     if run.status not in [RunStatus.PLANNED, RunStatus.REVIEWING]:
         raise HTTPException(status_code=400, detail=f"Cannot edit run in status: {run.status}")
 
-    await check_rate_limit(x_user_id or "anonymous", redis_client)
+    if redis_client:
+        await check_rate_limit(x_user_id or "anonymous", redis_client)
     run = run_manager.update_run_status(run_id, RunStatus.PLANNING)
     background_tasks.add_task(
         workflow_engine.execute_planning_phase,
