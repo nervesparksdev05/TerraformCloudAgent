@@ -625,7 +625,7 @@ class WorkflowEngine:
                 run.metadata = run.metadata or {}
                 run.metadata["auto_import_applied"] = [e["resource_address"] for e in import_errors]
                 self.run_manager.save_run_state(run_id, run)
-            logger.info("[%s] [OK] Retry apply after auto-import succeeded.", run_id)
+
             return True
 
         except subprocess.CalledProcessError as e:

@@ -1000,7 +1000,7 @@ class ConversationManager:
             "instance_type":        p.get("instance_type", "t3.micro"),
             "instance_count":       p.get("instance_count", 1),
             "storage_size_gb":      p.get("storage_size_gb", 8),
-            "storage_type":         p.get("storage_type", "gp2"),
+            "storage_type":         p.get("storage_type", "gp3"),
             "vpc_cidr":             p.get("vpc_cidr", "10.0.0.0/16"),
             "subnet_count":         p.get("subnet_count", 2),
             "enable_public_ip":     p.get("enable_public_ip", True),
@@ -1069,7 +1069,7 @@ class ConversationManager:
         p.setdefault("vpc_cidr",         "10.0.0.0/16")
         p.setdefault("subnet_count",     2 if prod else 1)
         p.setdefault("storage_size_gb",  20 if prod else 8)
-        p.setdefault("storage_type",     "gp2")
+        p.setdefault("storage_type",     "gp3")
         p.setdefault("enable_public_ip", not prod)  # prod uses ALB; dev uses public IP
         p.setdefault("monitoring_enabled", True)
         p.setdefault("ssh_username",     "ubuntu")
@@ -1145,11 +1145,11 @@ class ConversationManager:
         # EBS
         total_disk = min_inst * disk_gb
         if not prod and total_disk <= 30:
-            lines.append(f"  • EBS ({int(total_disk)}GB gp2): $0.00/mo [OK] Free Tier")
+            lines.append(f"  • EBS ({int(total_disk)}GB ): $0.00/mo [OK] Free Tier")
         else:
             ebs = total_disk * 0.10
             total += ebs
-            lines.append(f"  • EBS ({int(total_disk)}GB gp2): ${ebs:.2f}/mo")
+            lines.append(f"  • EBS ({int(total_disk)}GB gp3): ${ebs:.2f}/mo")
 
         # ALB
         if has_alb:

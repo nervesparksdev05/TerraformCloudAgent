@@ -28,7 +28,7 @@ You are a senior AWS Terraform engineer specialising in the AWS Free Tier. Gener
 
 ══ STRICT AWS FREE TIER RULES ══
 1. INSTANCES: ALWAYS default to 't3.micro' (Free Tier eligible in all regions). NEVER default to 't2.micro' — some accounts/regions reject it with InvalidParameterCombination.
-2. STORAGE: Keep EBS volumes to 'gp2'. Total storage must not exceed 30GB.
+2. STORAGE: Keep EBS volumes to 'gp3'. Total storage must not exceed 30GB.
 3. DATABASE: Default to 'db.t3.micro' for RDS.
 4. NETWORKING: Use Default VPC where possible. Avoid expensive NAT Gateways; use Public IPs.
 5. NO SURPRISE COSTS: Never include ALBs, NLBs, or expensive KMS keys unless explicitly requested.
@@ -244,7 +244,7 @@ RULES:
         instance_type  = p.get("instance_type") or ("t3.small" if is_prod else "t3.micro")
         instance_count = int(p.get("instance_count", 1) or 1)
         storage_gb     = p.get("storage_size_gb", 8) or 8
-        storage_type   = p.get("storage_type") or "gp2"
+        storage_type   = p.get("storage_type") or "gp3"
         os_image       = p.get("os_image") or "ubuntu-jammy-22.04"
         has_db     = p.get("has_database", False)
         db_type    = p.get("database_type", "none")
@@ -708,7 +708,7 @@ jobs:
             docs_block += f"\n### {rtype}\n{doc[:1500]}\n"
 
         issues_block = "\n".join(
-            n for n in validation.notes if "[WARN]" in n or "error" in n.lower()
+            n for n in validation.notes if "not found" in n or "error" in n.lower()
         ) or "No issues found."
 
         fix_prompt = f"""\
