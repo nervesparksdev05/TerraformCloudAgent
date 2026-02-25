@@ -52,6 +52,7 @@ class DatabaseManager:
         if self._client:
             self._client.close()
             self._client = None
+            self._db = None
             logger.info("MongoDB connection closed")
 
 # Global instance

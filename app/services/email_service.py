@@ -47,11 +47,12 @@ class EmailService:
         if not self.enabled:
             logger.warning("Email service is disabled. Check SMTP configuration.")
     
-    def generate_approval_token(self, run_id: str, user_email: str) -> str:
+    def generate_approval_token(self, run_id: str, user_email: str, action: str = "approve") -> str:
         """Generate a signed token for approve/reject links"""
         data = {
             "run_id": run_id,
             "user_email": user_email,
+            "action": action,
             "timestamp": datetime.utcnow().isoformat()
         }
         return self.serializer.dumps(data)
@@ -250,8 +251,8 @@ class EmailService:
         
         try:
             # Generate tokens
-            approve_token = self.generate_approval_token(run_id, to_email)
-            reject_token = self.generate_approval_token(run_id, to_email)
+            approve_token = self.generate_approval_token(run_id, to_email, action="approve")
+            reject_token = self.generate_approval_token(run_id, to_email, action="reject")
             
             # Create message
             msg = MIMEMultipart('alternative')

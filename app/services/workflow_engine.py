@@ -156,7 +156,7 @@ class WorkflowEngine:
                     workspace_path
                 )
                 params = request.request if isinstance(request.request, dict) else {}
-                bundle = self.llm_generator.refine_terraform(
+                bundle = await self.llm_generator.refine_terraform(
                     base_request=(
                         request.request
                         if isinstance(request.request, str)

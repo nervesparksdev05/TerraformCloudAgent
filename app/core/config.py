@@ -43,6 +43,13 @@ SEND_EMAIL_ALERTS = os.getenv("SEND_EMAIL_ALERTS", "true").lower() == "true"
 
 # Approval token settings
 APPROVAL_TOKEN_SECRET = os.getenv("APPROVAL_TOKEN_SECRET", "change-this-secret-key")
+if APPROVAL_TOKEN_SECRET == "change-this-secret-key":
+    import warnings
+    warnings.warn(
+        "APPROVAL_TOKEN_SECRET is using the default insecure value. "
+        "Set a strong secret in your .env file before deploying to production.",
+        stacklevel=1,
+    )
 APPROVAL_TOKEN_EXPIRY_HOURS = int(os.getenv("APPROVAL_TOKEN_EXPIRY_HOURS", "24"))
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 

@@ -607,9 +607,7 @@ class ConversationManager:
                 if alias in cp and cp[alias] not in (None, ""):
                     cfg[canonical] = cp.pop(alias)
                     break
-        t = cfg.get("cpu_threshold")
-        if isinstance(t, (int, float)) and t > 1:
-            cfg["cpu_threshold"] = round(t / 100, 2)
+        # Note: AWS CloudWatch target tracking expects whole numbers (e.g., 70 = 70%)
 
     @staticmethod
     def _parse_json(raw: str) -> dict:

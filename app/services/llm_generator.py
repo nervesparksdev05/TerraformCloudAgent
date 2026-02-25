@@ -165,7 +165,7 @@ RULES:
 
     async def diagnose_error(self, error_msg: str, terraform_code: dict) -> dict:
         system = (
-            "You are a Senior GCP Cloud Architect diagnosing a Terraform deployment failure.\n"
+            "You are a Senior AWS Cloud Architect diagnosing a Terraform deployment failure.\n"
             "Return ONLY JSON:\n"
             '{"diagnosis": str, "action_type": "manual_action"|"auto_fix", '
             '"suggested_fix": str, "confidence": float}'

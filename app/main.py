@@ -287,8 +287,8 @@ async def stream_message(
     import json
 
     async def generate():
-        if user:
-            await check_rate_limit(user.get("uid", "anonymous"), redis_client)
+        if redis_client:
+            await check_rate_limit(user.get("uid", "anonymous") if user else "anonymous", redis_client)
 
         session = conversation_manager.get_session(session_id)
         if not session:

@@ -24,7 +24,8 @@ class RunManager:
         """Initialize a new run workspace and state"""
         # Generate ID
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_id = f"run_{timestamp}"
+        import secrets
+        run_id = f"run_{timestamp}_{secrets.token_hex(4)}"
         
         # Create workspace
         workspace_path = self.base_dir / run_id

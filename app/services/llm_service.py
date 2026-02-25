@@ -424,7 +424,7 @@ class AsyncLLMService(LLMService):
         )
 
         chat = model.start_chat(history=history)
-
+        mcp_start_time = time.time()
         response = await asyncio.to_thread(
             chat.send_message,
             last_user,
@@ -483,7 +483,7 @@ class AsyncLLMService(LLMService):
                 input_messages=messages,
                 output=result[:10000],
                 usage=usage,
-                start_time=time.time(),
+                start_time=mcp_start_time,
             )
             try:
                 _trace.update(output=result[:10000])
