@@ -45,6 +45,7 @@ class ChatMessageResponse(BaseModel):
     suggestions: List[str] = []
     run_id: Optional[str] = Field(None, description="Run ID if Terraform generation was triggered automatically")
     next_question: Optional[str] = None
+    trace_id: Optional[str] = Field(None, description="Langfuse trace ID for this response, used to link feedback")
 
 
 class ConversationCreateResponse(BaseModel):
@@ -66,3 +67,4 @@ class FeedbackRequest(BaseModel):
     """User feedback for LLM context gathering"""
     rating: int = Field(..., ge=1, le=5, description="Star rating from 1 to 5")
     comment: Optional[str] = Field(None, description="Optional feedback comment")
+    trace_id: Optional[str] = Field(None, description="Langfuse trace ID to attach feedback to a specific LLM output")

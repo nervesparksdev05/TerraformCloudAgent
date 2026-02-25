@@ -265,10 +265,14 @@ async def send_message(
             user_message=chat_message.message,
         )
         if response.is_complete:
-            try:
-                response.run_id = await _launch_planning(session_id, background_tasks)
-            except Exception as e:
-                logger.error("[%s] Auto-generate failed: %s", session_id, e, exc_info=True)
+            # Guard: only auto-generate if no run already exists for this session
+            existing_params = conversation_manager.get_collected_parameters(session_id)
+            existing_runs = existing_params.get("run_ids", [])
+            if not existing_runs:
+                try:
+                    response.run_id = await _launch_planning(session_id, background_tasks)
+                except Exception as e:
+                    logger.error("[%s] Auto-generate failed: %s", session_id, e, exc_info=True)
 
         return response
     except HTTPException:
@@ -349,8 +353,9 @@ async def submit_feedback(
     try:
         from app.services import langfuse_service
 
-        # Link feedback to the actual LLM generation trace if available
-        trace_id = session.last_trace_id
+        # Prefer trace_id from request (targets specific message),
+        # fallback to session's last_trace_id
+        trace_id = feedback.trace_id or session.last_trace_id
         if trace_id:
             # Score the actual conversation turn trace
             langfuse_service.log_score(
@@ -580,10 +585,10 @@ async def reject_run(run_id: str):
     run = run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    if run.status in [RunStatus.COMPLETED, RunStatus.FAILED]:
+    if run.status in [RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.REJECTED]:
         raise HTTPException(status_code=400, detail=f"Cannot reject run in status: {run.status}")
 
-    run = run_manager.update_run_status(run_id, RunStatus.FAILED, error="Rejected by user")
+    run = run_manager.update_run_status(run_id, RunStatus.REJECTED, error="Rejected by user")
     logger.info("[%s] Run rejected", run_id)
     return run
 
@@ -667,6 +672,8 @@ async def approve_via_email(token: str, background_tasks: BackgroundTasks):
     data = email_service.verify_approval_token(token)
     if not data:
         return HTMLResponse("<h1> Invalid or expired token</h1>", status_code=400)
+    if data.get("action") != "approve":
+        return HTMLResponse("<h1> Invalid token — this is not an approval token</h1>", status_code=400)
 
     run_id     = data.get("run_id")
     user_email = data.get("user_email")
@@ -706,6 +713,8 @@ async def reject_via_email(token: str, reason: str = "Rejected via email"):
     data = email_service.verify_approval_token(token)
     if not data:
         return HTMLResponse("<h1> Invalid or expired token</h1>", status_code=400)
+    if data.get("action") != "reject":
+        return HTMLResponse("<h1> Invalid token — this is not a rejection token</h1>", status_code=400)
 
     run_id     = data.get("run_id")
     user_email = data.get("user_email")

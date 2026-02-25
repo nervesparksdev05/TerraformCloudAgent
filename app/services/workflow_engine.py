@@ -245,8 +245,8 @@ class WorkflowEngine:
         Transitions: APPROVED → APPLYING → COMPLETED (or FAILED)
 
         Safety gate (in order):
-          1. GCP_PROJECT_ID must be set
-          2. GCP credentials file must exist and be valid JSON
+          1. AWS credentials must be set
+          2. AWS region must be set
           3. terraform validate  — syntax / provider check
           4. terraform plan -out=tfplan  — capture plan; abort if no changes
           5. Destructive resource scan  — warn loudly if any resource will be destroyed
@@ -675,7 +675,7 @@ class WorkflowEngine:
         logger.debug("[%s] terraform plan", workspace_path.name)
         result = await asyncio.to_thread(
             self._subprocess_run,
-            ["terraform", "plan", "-no-color"],
+            ["terraform", "plan", "-out=tfplan", "-no-color", "-input=false"],
             workspace_path,
         )
         return result.stdout

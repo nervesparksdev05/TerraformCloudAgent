@@ -541,7 +541,7 @@ class ConversationManager:
             )
 
         session.is_complete = bool(data["is_complete"])
-        session.updated_at  = datetime.now()
+        session.updated_at  = datetime.utcnow()
 
         if session.is_complete:
             self._apply_defaults(session.collected_parameters)
@@ -562,6 +562,7 @@ class ConversationManager:
             collected_parameters=session.collected_parameters,
             is_complete=session.is_complete,
             suggestions=data.get("suggestions", []),
+            trace_id=session.last_trace_id,
         )
 
     @staticmethod
