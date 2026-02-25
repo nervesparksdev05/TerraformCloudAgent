@@ -264,12 +264,12 @@ class WorkflowEngine:
                 raise ValueError(
                     "AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) are not set in .env — cannot deploy."
                 )
-            logger.info("[%s] ✅ AWS Credentials found", run_id)
+            logger.info("[%s] [OK] AWS Credentials found", run_id)
 
             # ── CHECK 2: AWS Region ───────────────────────────────────
             if not config.AWS_REGION:
                 raise ValueError("AWS_REGION is not set in .env — cannot deploy.")
-            logger.info("[%s] ✅ AWS_REGION = %s", run_id, config.AWS_REGION)
+            logger.info("[%s] [OK] AWS_REGION = %s", run_id, config.AWS_REGION)
 
             # ── CHECK 2.5: Generate safe terraform.tfvars.json ────────
             logger.info("[%s] Generating terraform.tfvars.json...", run_id)
@@ -281,7 +281,7 @@ class WorkflowEngine:
 
             vars_file = workspace_path / "terraform.tfvars.json"
             vars_file.write_text(json.dumps(safe_vars, indent=2), encoding="utf-8")
-            logger.info("[%s] ✅ terraform.tfvars.json generated (%d vars)", run_id, len(safe_vars))
+            logger.info("[%s] [OK] terraform.tfvars.json generated (%d vars)", run_id, len(safe_vars))
 
             # ── CHECK 3: terraform init ────────────────────────────────
             logger.info("[%s] Running terraform init...", run_id)
@@ -290,7 +290,7 @@ class WorkflowEngine:
                 ["terraform", "init", "-input=false"],
                 workspace_path,
             )
-            logger.info("[%s] ✅ terraform init OK", run_id)
+            logger.info("[%s] [OK] terraform init OK", run_id)
 
             # ── CHECK 4: terraform validate ───────────────────────────
             logger.info("[%s] Running terraform validate...", run_id)
@@ -299,7 +299,7 @@ class WorkflowEngine:
                 ["terraform", "validate"],
                 workspace_path,
             )
-            logger.info("[%s] ✅ terraform validate OK", run_id)
+            logger.info("[%s] [OK] terraform validate OK", run_id)
 
             # ── CHECK 5: terraform plan → save to tfplan ──────────────
             logger.info("[%s] Running terraform plan...", run_id)
@@ -310,7 +310,7 @@ class WorkflowEngine:
             )
             # -detailed-exitcode: 0=no changes, 1=error, 2=changes present
             if plan_result.returncode == 0:
-                logger.warning("[%s] ⚠️  Terraform plan shows NO changes — nothing to apply. Marking complete.", run_id)
+                logger.warning("[%s] [WARN] Terraform plan shows NO changes — nothing to apply. Marking complete.", run_id)
                 run = self.run_manager.get_run(run_id)
                 if run:
                     run.status = RunStatus.COMPLETED
@@ -319,7 +319,7 @@ class WorkflowEngine:
                 return
             if plan_result.returncode == 1:
                 raise subprocess.CalledProcessError(1, "terraform plan", plan_result.stdout, plan_result.stderr)
-            logger.info("[%s] ✅ terraform plan OK — changes detected", run_id)
+            logger.info("[%s] [OK] terraform plan OK — changes detected", run_id)
 
             # ── CHECK 6: Destructive resource scan ────────────────────
             plan_text = plan_result.stdout or ""
@@ -329,7 +329,7 @@ class WorkflowEngine:
             ]
             if destroyed:
                 logger.warning(
-                    "[%s] ⚠️  DESTRUCTIVE OPERATIONS DETECTED (%d resources):\n%s",
+                    "[%s] [WARN] DESTRUCTIVE OPERATIONS DETECTED (%d resources):\n%s",
                     run_id, len(destroyed), "\n".join(destroyed),
                 )
                 run = self.run_manager.get_run(run_id)
@@ -338,7 +338,7 @@ class WorkflowEngine:
                     run.metadata["destructive_resources"] = destroyed
                     self.run_manager.save_run_state(run_id, run)
             else:
-                logger.info("[%s] ✅ No destructive operations in plan", run_id)
+                logger.info("[%s] [OK] No destructive operations in plan", run_id)
 
             # ── APPLY ─────────────────────────────────────────────────
             logger.info("[%s] Applying terraform plan...", run_id)
@@ -350,7 +350,7 @@ class WorkflowEngine:
                 run.outputs = outputs
                 self.run_manager.save_run_state(run_id, run)
 
-            logger.info("[%s] ✅ Apply phase complete", run_id)
+            logger.info("[%s] [OK] Apply phase complete", run_id)
 
         except subprocess.CalledProcessError as spe:
             stderr = spe.stderr or ""
@@ -587,7 +587,7 @@ class WorkflowEngine:
                     ["terraform", "import", addr, import_id],
                     workspace_path,
                 )
-                logger.info("[%s] ✅ Imported %s as %s", run_id, import_id, addr)
+                logger.info("[%s] [OK] Imported %s as %s", run_id, import_id, addr)
                 imported_any = True
             except subprocess.CalledProcessError as e:
                 logger.error("[%s] terraform import failed for %s: %s", run_id, addr, e.stderr)
@@ -608,7 +608,7 @@ class WorkflowEngine:
                     1, "terraform plan (retry)", plan_result.stdout, plan_result.stderr
                 )
             if plan_result.returncode == 0:
-                logger.info("[%s] ✅ No remaining changes after import — marking complete.", run_id)
+                logger.info("[%s] [OK] No remaining changes after import — marking complete.", run_id)
                 run = self.run_manager.get_run(run_id)
                 if run:
                     run.status = RunStatus.COMPLETED
@@ -625,7 +625,7 @@ class WorkflowEngine:
                 run.metadata = run.metadata or {}
                 run.metadata["auto_import_applied"] = [e["resource_address"] for e in import_errors]
                 self.run_manager.save_run_state(run_id, run)
-            logger.info("[%s] ✅ Retry apply after auto-import succeeded.", run_id)
+            logger.info("[%s] [OK] Retry apply after auto-import succeeded.", run_id)
             return True
 
         except subprocess.CalledProcessError as e:

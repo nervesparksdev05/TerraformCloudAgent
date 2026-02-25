@@ -192,7 +192,9 @@ async def health_check():
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 @app.post("/auth/sync-user")
-async def sync_user(user: Dict = Depends(get_current_user)):
+async def sync_user(user: Optional[Dict] = Depends(get_current_user)):
+    if not user:
+        return {"status": "skipped", "message": "Auth disabled"}
     try:
         doc = user_service.upsert_user(user)
         return {"status": "ok", "user": doc}
@@ -657,17 +659,17 @@ async def approve_via_email(token: str, background_tasks: BackgroundTasks):
 
     data = email_service.verify_approval_token(token)
     if not data:
-        return HTMLResponse("<h1>❌ Invalid or expired token</h1>", status_code=400)
+        return HTMLResponse("<h1> Invalid or expired token</h1>", status_code=400)
 
     run_id     = data.get("run_id")
     user_email = data.get("user_email")
     run        = run_manager.get_run(run_id)
     if not run:
-        return HTMLResponse("<h1>❌ Run not found</h1>", status_code=404)
+        return HTMLResponse("<h1> Run not found</h1>", status_code=404)
     if run.status == RunStatus.APPROVED:
-        return HTMLResponse(f"<h1>✅ Already Approved</h1><p>Run {run_id} was already approved.</p>")
+        return HTMLResponse(f"<h1> Already Approved</h1><p>Run {run_id} was already approved.</p>")
     if run.status not in [RunStatus.PLANNED, RunStatus.REVIEWING]:
-        return HTMLResponse(f"<h1>⚠️ Cannot Approve</h1><p>Status is {run.status}.</p>", status_code=400)
+        return HTMLResponse(f"<h1> Cannot Approve</h1><p>Status is {run.status}.</p>", status_code=400)
 
     run = run_manager.update_run_status(run_id, RunStatus.APPROVED)
     if not run.approval_info:
@@ -683,7 +685,7 @@ async def approve_via_email(token: str, background_tasks: BackgroundTasks):
     return HTMLResponse(f"""
     <html><head><title>Approved</title></head>
     <body style="font-family:sans-serif;text-align:center;padding:50px">
-      <h1 style="color:#10b981">✅ Run Approved & Apply Triggered</h1>
+      <h1 style="color:#10b981"> Run Approved & Apply Triggered</h1>
       <p>Run ID: <code>{run_id}</code></p>
       <p>Terraform Apply has started. You can close this window.</p>
     </body></html>
@@ -696,15 +698,15 @@ async def reject_via_email(token: str, reason: str = "Rejected via email"):
 
     data = email_service.verify_approval_token(token)
     if not data:
-        return HTMLResponse("<h1>❌ Invalid or expired token</h1>", status_code=400)
+        return HTMLResponse("<h1> Invalid or expired token</h1>", status_code=400)
 
     run_id     = data.get("run_id")
     user_email = data.get("user_email")
     run        = run_manager.get_run(run_id)
     if not run:
-        return HTMLResponse("<h1>❌ Run not found</h1>", status_code=404)
+        return HTMLResponse("<h1> Run not found</h1>", status_code=404)
     if run.status in [RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.REJECTED]:
-        return HTMLResponse(f"<h1>⚠️ Already in status {run.status}</h1>", status_code=400)
+        return HTMLResponse(f"<h1> Already in status {run.status}</h1>", status_code=400)
 
     updated_run = run_manager.update_run_status(run_id, RunStatus.REJECTED, error=f"Rejected by user: {reason}")
     if updated_run:
@@ -721,7 +723,7 @@ async def reject_via_email(token: str, reason: str = "Rejected via email"):
     return HTMLResponse(f"""
     <html><head><title>Rejected</title></head>
     <body style="font-family:sans-serif;text-align:center;padding:50px">
-      <h1 style="color:#ef4444">❌ Run Rejected</h1>
+      <h1 style="color:#ef4444"> Run Rejected</h1>
       <p>Run ID: <code>{run_id}</code></p>
       <p>The configuration will not be applied.</p>
     </body></html>

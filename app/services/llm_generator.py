@@ -34,10 +34,19 @@ You are a senior AWS Terraform engineer specialising in the AWS Free Tier. Gener
 5. NO SURPRISE COSTS: Never include ALBs, NLBs, or expensive KMS keys unless explicitly requested.
 
 ══ TERRAFORM/PROVIDER BLOCK (MANDATORY) ══
-6. EVERY generated main.tf MUST start with:
-   terraform { required_providers { aws = { source = "hashicorp/aws", version = "~> 5.0" } } }
-   provider "aws" { region = var.aws_region }
-   Without this, Terraform uses the wrong provider version or region and the deploy fails.
+6. EVERY generated main.tf MUST start with a MULTI-LINE terraform block. Single-line blocks cause HCL parse errors.
+   terraform {
+     required_providers {
+       aws = {
+         source  = "hashicorp/aws"
+         version = "~> 5.0"
+       }
+     }
+   }
+   provider "aws" {
+     region = var.aws_region
+   }
+   CRITICAL: NEVER put the terraform/required_providers block on a single line. Terraform fmt REJECTS single-line nested blocks.
 
 ══ IDEMPOTENCY RULES (prevent EntityAlreadyExists on re-deploy) ══
 7. IAM NAMING: ALWAYS use 'name_prefix' (not 'name') for aws_iam_role, aws_iam_policy, aws_iam_instance_profile.
@@ -432,7 +441,7 @@ jobs:
 
         raw = await self.llm_service.chat_completion(
             messages=messages,
-            temperature=0.1, max_tokens=8192,
+            temperature=0.1, max_tokens=32768,
             response_format={"type": "json_object"}, timeout=120,
             _trace=trace,
         )
@@ -470,6 +479,7 @@ jobs:
           FIX 10 — key_pair_name default "REPLACE_ME"      → InvalidKeyPair at apply
           FIX 11 — alert_email default "REPLACE_ME@..."    → SNS invalid endpoint at apply
           FIX 12 — missing provider/terraform block        → wrong region/version
+          FIX 13 — single-line terraform block             → terraform fmt rejects it
         """
         import re
 
@@ -567,6 +577,28 @@ jobs:
             main = provider_block + main
         elif 'provider "aws"' not in main:
             main = main + '\nprovider "aws" {\n  region = var.aws_region\n}\n'
+
+        # FIX 13: Reformat single-line terraform { required_providers { ... } } blocks
+        # The LLM sometimes generates the entire terraform block on one line which terraform fmt rejects.
+        single_line_tf = re.search(
+            r'^(\s*)terraform\s*\{\s*required_providers\s*\{\s*aws\s*=\s*\{\s*'
+            r'source\s*=\s*"([^"]*)"\s*,?\s*version\s*=\s*"([^"]*)"\s*\}\s*\}\s*\}',
+            main, flags=re.MULTILINE,
+        )
+        if single_line_tf:
+            src = single_line_tf.group(2)
+            ver = single_line_tf.group(3)
+            replacement = (
+                'terraform {\n'
+                '  required_providers {\n'
+                '    aws = {\n'
+                f'      source  = "{src}"\n'
+                f'      version = "{ver}"\n'
+                '    }\n'
+                '  }\n'
+                '}'
+            )
+            main = main[:single_line_tf.start()] + replacement + main[single_line_tf.end():]
 
         # ══════════════════════════════════════════════════════════════════
         # variables.tf fixes
@@ -676,7 +708,7 @@ jobs:
             docs_block += f"\n### {rtype}\n{doc[:1500]}\n"
 
         issues_block = "\n".join(
-            n for n in validation.notes if "⚠️" in n or "error" in n.lower()
+            n for n in validation.notes if "[WARN]" in n or "error" in n.lower()
         ) or "No issues found."
 
         fix_prompt = f"""\
@@ -725,7 +757,7 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
             raw = await self.llm_service.chat_completion(
                 messages=messages,
                 temperature=0.05,
-                max_tokens=8192,
+                max_tokens=32768,
                 response_format={"type": "json_object"},
                 timeout=120,
                 _trace=trace,

@@ -192,7 +192,7 @@ class EmailService:
         </head>
         <body>
             <div class="header">
-                <h1>🚀 Terraform Configuration Ready for Review</h1>
+                <h1>Terraform Configuration Ready for Review</h1>
             </div>
             
             <div class="content">
@@ -201,27 +201,27 @@ class EmailService:
                 <p>Your Terraform configuration has been generated and is ready for approval.</p>
                 
                 <div class="summary">
-                    <h3>📋 Run Details</h3>
+                    <h3>Run Details</h3>
                     <p><strong>Run ID:</strong> {run_id}</p>
                     <p><strong>Total Resources:</strong> {len(resources)}</p>
                     <p><strong>Generated:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</p>
                 </div>
                 
                 <div class="resources">
-                    <h3>📦 Resources to be Created</h3>
+                    <h3>Resources to be Created</h3>
                     <ul>
                         {resource_list}
                     </ul>
                 </div>
                 
                 <div class="warning">
-                    <strong>⚠️ Important:</strong> Please review the attached Terraform files carefully before approving.
+                    <strong>Important:</strong> Please review the attached Terraform files carefully before approving.
                     This will create real infrastructure resources in your cloud account.
                 </div>
                 
                 <div class="button-container">
-                    <a href="{approve_url}" class="button approve-btn">✅ Approve</a>
-                    <a href="{reject_url}" class="button reject-btn">❌ Reject</a>
+                    <a href="{approve_url}" class="button approve-btn">Approve</a>
+                    <a href="{reject_url}" class="button reject-btn">Reject</a>
                 </div>
                 
                 <div class="footer">
@@ -309,7 +309,7 @@ class EmailService:
         
         try:
             status = "Approved" if approved else "Rejected"
-            emoji = "✅" if approved else "❌"
+            indicator = "[APPROVED]" if approved else "[REJECTED]"
             color = "#10b981" if approved else "#ef4444"
             
             html = f"""
@@ -339,7 +339,7 @@ class EmailService:
             </head>
             <body>
                 <div class="header">
-                    <h1>{emoji} Terraform Configuration {status}</h1>
+                    <h1>{indicator} Terraform Configuration {status}</h1>
                 </div>
                 <div class="content">
                     <p>Your Terraform configuration (Run ID: {run_id}) has been <strong>{status.lower()}</strong>.</p>

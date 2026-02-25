@@ -569,19 +569,19 @@ class MCPManager:
                                         )
                                         if detail_result and detail_result.content:
                                             resource_docs[rtype] = str(detail_result.content)[:3000]
-                                            notes.append(f"Registry: ✅ {rtype} — docs fetched.")
+                                            notes.append(f"Registry: [OK] {rtype} -- docs fetched.")
                                         else:
                                             resource_docs[rtype] = raw_search[:1000]
-                                            notes.append(f"Registry: ✅ {rtype} — found in registry.")
+                                            notes.append(f"Registry: [OK] {rtype} -- found in registry.")
                                     except Exception:
                                         resource_docs[rtype] = raw_search[:1000]
-                                        notes.append(f"Registry: ✅ {rtype} — found (detail fetch failed).")
+                                        notes.append(f"Registry: [OK] {rtype} -- found (detail fetch failed).")
                                 else:
                                     resource_docs[rtype] = raw_search[:1000]
-                                    notes.append(f"Registry: ✅ {rtype} — found in registry.")
+                                    notes.append(f"Registry: [OK] {rtype} -- found in registry.")
                                 logger.info("validate_terraform: %s → found", rtype)
                             else:
-                                notes.append(f"Registry: ⚠️  {rtype} — not found (may need renaming).")
+                                notes.append(f"Registry: [WARN] {rtype} -- not found (may need renaming).")
                                 ok = False
                                 logger.warning("validate_terraform: %s → NOT FOUND", rtype)
                         except asyncio.TimeoutError:

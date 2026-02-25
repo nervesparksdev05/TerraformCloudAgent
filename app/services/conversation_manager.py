@@ -28,7 +28,7 @@ AWS_TOP15 = AWS_CORE + [
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 _SYSTEM = """\
-You are TerraBot 🤖 — a senior AWS cloud architect and your friendly, patient mentor. Your mission is to guide the user from a blank slate to a fully functional app on AWS.
+You are TerraBot  — a senior AWS cloud architect and your friendly, patient mentor. Your mission is to guide the user from a blank slate to a fully functional app on AWS.
 
 AWS MCP TOOLS:
 - You have live access to the AWS SDK via MCP.
@@ -134,19 +134,19 @@ KEY RULES:
 
 COMPLETENESS GATE — before setting is_complete:true, verify in extracted_params:
   FOR BOTH DEV AND PROD:
-  ✅ aws_region         — e.g. "us-east-1"
-  ✅ environment        — "dev" or "production"
-  ✅ instance_type      — derived from traffic (prod) or "t3.micro" (dev)
-  ✅ ssh_key_name       — EC2 key pair name OR "" confirmed SSM-only
-  ✅ alert_email        — valid email OR "" confirmed skip
-  ✅ ssh_allowed_cidrs  — list of CIDRs OR [] confirmed defer
+  [OK] aws_region         — e.g. "us-east-1"
+  [OK] environment        — "dev" or "production"
+  [OK] instance_type      — derived from traffic (prod) or "t3.micro" (dev)
+  [OK] ssh_key_name       — EC2 key pair name OR "" confirmed SSM-only
+  [OK] alert_email        — valid email OR "" confirmed skip
+  [OK] ssh_allowed_cidrs  — list of CIDRs OR [] confirmed defer
 
   FOR PRODUCTION ONLY (additional required fields):
-  ✅ daily_active_users — numeric value (e.g. 1000)
-  ✅ traffic_tier       — "low" | "medium" | "high" | "extreme"
-  ✅ use_asg            — true/false (derived from traffic_tier)
-  ✅ use_alb            — true/false (derived from traffic_tier)
-  ✅ enable_multi_az    — true/false (asked in Step 2, or false for low traffic)
+  [OK] daily_active_users — numeric value (e.g. 1000)
+  [OK] traffic_tier       — "low" | "medium" | "high" | "extreme"
+  [OK] use_asg            — true/false (derived from traffic_tier)
+  [OK] use_alb            — true/false (derived from traffic_tier)
+  [OK] enable_multi_az    — true/false (asked in Step 2, or false for low traffic)
 
 If ANY of these are missing, keep is_complete:false and ask for the next missing one in order.
 """
@@ -237,7 +237,7 @@ REQUIRED STRUCTURE:
 }
 
 GREETING FORMAT:
-Line 1:    "Welcome! I'm **TerraBot** — I just analyzed your [project] README! 🚀"
+Line 1:    "Welcome! I'm **TerraBot** — I just analyzed your [project] README! "
 Line 2:    "Here's what I found:"
 Lines 3-9: one specific bullet per detected tech — version, hosting model, purpose
 Lines 10-11: infrastructure needed; if Atlas → say "MongoDB Atlas (external — no RDS needed, just inject MONGO_URI)"
@@ -414,7 +414,7 @@ class ConversationManager:
             return {
                 "session_id": sid,
                 "bot_response": (
-                    "Hey! 👋 I'm **TerraBot** — your AWS Terraform guide.\n"
+                    "Hey!  I'm **TerraBot** — your AWS Terraform guide.\n"
                     "I'll analyze your GitHub README and generate Free Tier eligible AWS infrastructure.\n"
                     "What's your GitHub repo? (e.g., owner: `facebook`, repo: `react`)"
                 ),
@@ -548,9 +548,9 @@ class ConversationManager:
             session.status = ConversationStatus.COMPLETE
             cost = self._calculate_cost(session.collected_parameters)
             data["message"] = (
-                f"✅ Perfect! I have everything needed for your AWS infrastructure.\n\n"
-                f"**💰 Cost Estimate:**\n{cost}\n\n"
-                "Generating `main.tf`, `variables.tf`, `outputs.tf` and a GitHub Actions workflow now! 🚀"
+                f"[OK] Perfect! I have everything needed for your AWS infrastructure.\n\n"
+                f"** Cost Estimate:**\n{cost}\n\n"
+                "Generating `main.tf`, `variables.tf`, `outputs.tf` and a GitHub Actions workflow now! "
             )
 
         session.messages.append({"role": "assistant", "content": data["message"]})
@@ -733,7 +733,7 @@ class ConversationManager:
             # STEP 1: Traffic (must come first — everything depends on it)
             if dau is None:
                 pending.append(
-                    "  - 🚦 TRAFFIC SIZING (ask this FIRST): How many daily active users at launch? "
+                    "  -  TRAFFIC SIZING (ask this FIRST): How many daily active users at launch? "
                     "This determines instance size, Auto Scaling, and load balancer requirements. "
                     "Examples: 200 DAU → t3.small (1 server), 1000 DAU → t3.medium + ASG, "
                     "5000 DAU → t3.large + ALB + ASG (3–8 servers)."
@@ -743,7 +743,7 @@ class ConversationManager:
             # STEP 2: HA / Multi-AZ (only if medium+ traffic)
             if tier in ("medium", "high", "extreme") and cp.get("enable_multi_az") is None:
                 pending.append(
-                    f"  - 🔄 HIGH AVAILABILITY: With {int(dau):,} DAU you need zero-downtime failover. "
+                    f"  -  HIGH AVAILABILITY: With {int(dau):,} DAU you need zero-downtime failover. "
                     f"Enable Multi-AZ for RDS and ElastiCache? "
                     f"Yes = automatic failover in ~60s if the primary fails. "
                     f"No = single AZ, cheaper but brief downtime on failure."
@@ -754,20 +754,20 @@ class ConversationManager:
                 asg = cp.get("autoscaling_config") or {}
                 if not asg.get("cpu_threshold"):
                     pending.append(
-                        f"  - ⚡ AUTO SCALING threshold: at what CPU% should we add a new server? "
+                        f"  -  AUTO SCALING threshold: at what CPU% should we add a new server? "
                         f"Recommend 70% — this gives headroom before users feel slowness. "
                         f"(Current setup: {asg.get('min_instances', 2)}–{asg.get('max_instances', 4)} servers)"
                     )
                 if not asg.get("health_check_path"):
                     pending.append(
-                        "  - 🏥 HEALTH CHECK path: what endpoint does the ALB ping to check server health? "
+                        "  -  HEALTH CHECK path: what endpoint does the ALB ping to check server health? "
                         "e.g. /health, /api/health, or / — must return HTTP 200."
                     )
 
             # STEP 4: Domain
             if cp.get("custom_domain") is None:
                 pending.append(
-                    "  - 🌐 CUSTOM DOMAIN: do you have a domain (e.g. myapp.com)? "
+                    "  -  CUSTOM DOMAIN: do you have a domain (e.g. myapp.com)? "
                     "Yes → we'll configure Route 53 + ACM SSL cert (free). "
                     "No → your app will be accessible via the ALB's auto-generated DNS."
                 )
@@ -775,7 +775,7 @@ class ConversationManager:
             # STEP 5: Alert email
             if cp.get("alert_email") is None:
                 pending.append(
-                    "  - 📧 ALERT EMAIL: where should CloudWatch send CPU spike / error alerts? "
+                    "  -  ALERT EMAIL: where should CloudWatch send CPU spike / error alerts? "
                     "For production this is essential — you want to know before users complain. "
                     "Say 'skip' to disable."
                 )
@@ -783,12 +783,12 @@ class ConversationManager:
             # STEP 6: SSH access
             if cp.get("ssh_key_name") is None and cp.get("key_pair_name") is None:
                 pending.append(
-                    "  - 🔑 SSH ACCESS: your EC2 key pair name, or 'skip' for SSM Session Manager. "
+                    "  -  SSH ACCESS: your EC2 key pair name, or 'skip' for SSM Session Manager. "
                     "For prod, SSM is often better — no open port 22, full audit trail."
                 )
             if cp.get("ssh_allowed_cidrs") is None:
                 pending.append(
-                    "  - 🛡️  SSH CIDR: restrict SSH to your office/VPN IP. "
+                    "  -   SSH CIDR: restrict SSH to your office/VPN IP. "
                     "NEVER use 0.0.0.0/0 in production. e.g. ['203.0.113.5/32']. "
                     "Say 'skip' to disable SSH (use SSM instead)."
                 )
@@ -796,7 +796,7 @@ class ConversationManager:
             # STEP 7: Region
             if not cp.get("aws_region") and not cp.get("region"):
                 pending.append(
-                    "  - 🌍 AWS REGION: which region are most of your users in? "
+                    "  -  AWS REGION: which region are most of your users in? "
                     "us-east-1 (USA), eu-west-1 (Europe), ap-south-1 (India), ap-southeast-1 (SE Asia). "
                     "Multi-AZ works in all main regions."
                 )
@@ -823,7 +823,7 @@ class ConversationManager:
             ]
             if secret_vars:
                 pending.append(
-                    f"  - 🔐 Secrets Manager: README has {len(secret_vars)} secret(s) "
+                    f"  -  Secrets Manager: README has {len(secret_vars)} secret(s) "
                     f"({', '.join(secret_vars[:3])}{'...' if len(secret_vars) > 3 else ''}). "
                     f"Store in AWS Secrets Manager? Recommended for prod, optional for dev."
                 )
@@ -883,7 +883,7 @@ class ConversationManager:
         )
         warnings = e.get("infrastructure_warnings") or []
         crit = "\n".join(
-            f"  🚨 {w.get('message','')} → {w.get('recommendation','')}"
+            f"   {w.get('message','')} → {w.get('recommendation','')}"
             for w in warnings if isinstance(w, dict) and w.get("severity") == "critical"
         ) or "  None"
         all_w = "\n".join(
@@ -908,7 +908,7 @@ class ConversationManager:
             f"JOBS: {'YES — ' + s('background_job_description') if b('background_jobs') else 'None'}\n"
             f"\nEXTERNAL SERVICES (env var injection only — never provision): {ext_str or 'None'}\n"
             f"\nREQUIRED ENV VARS:\n{env_str or '  Not detected'}\n"
-            f"\n🚨 CRITICAL WARNINGS:\n{crit}\n"
+            f"\n CRITICAL WARNINGS:\n{crit}\n"
             f"ALL WARNINGS:\n{all_w}\n"
         )
 
@@ -1131,7 +1131,7 @@ class ConversationManager:
         # EC2 (always show min cost; for ASG show range)
         unit = INST.get(itype, 15.18)
         if not prod and itype == "t3.micro":
-            lines.append(f"  • EC2 (1× {itype}): $0.00/mo ✅ Free Tier")
+            lines.append(f"  • EC2 (1× {itype}): $0.00/mo [OK] Free Tier")
         elif has_asg:
             lo = min_inst * unit
             hi = max_inst * unit
@@ -1145,7 +1145,7 @@ class ConversationManager:
         # EBS
         total_disk = min_inst * disk_gb
         if not prod and total_disk <= 30:
-            lines.append(f"  • EBS ({int(total_disk)}GB gp2): $0.00/mo ✅ Free Tier")
+            lines.append(f"  • EBS ({int(total_disk)}GB gp2): $0.00/mo [OK] Free Tier")
         else:
             ebs = total_disk * 0.10
             total += ebs
@@ -1168,7 +1168,7 @@ class ConversationManager:
             if multi_az:
                 db_cost *= 2
             if not prod and db_tier == "db.t3.micro" and not multi_az:
-                lines.append(f"  • RDS ({db_tier}): $0.00/mo ✅ Free Tier")
+                lines.append(f"  • RDS ({db_tier}): $0.00/mo [OK] Free Tier")
             else:
                 total += db_cost
                 multi_tag = " Multi-AZ" if multi_az else ""
@@ -1189,19 +1189,19 @@ class ConversationManager:
 
         # S3
         if has_bkt:
-            lines.append("  • S3: $0.00/mo ✅ Free Tier (5GB)")
+            lines.append("  • S3: $0.00/mo [OK] Free Tier (5GB)")
 
         # CloudWatch
-        lines.append("  • CloudWatch: $0.00/mo ✅ Free Tier")
+        lines.append("  • CloudWatch: $0.00/mo [OK] Free Tier")
 
         # Route53 / SSL
         if p.get("custom_domain"):
             total += 0.50
             lines.append("  • Route 53 Hosted Zone: $0.50/mo")
-            lines.append("  • ACM SSL Certificate: $0.00/mo ✅ Free")
+            lines.append("  • ACM SSL Certificate: $0.00/mo [OK] Free")
 
         dau_str = f" for ~{int(dau):,} DAU" if dau else ""
-        header = f"💰 **Production Cost Estimate{dau_str} ({tier} traffic tier)**:" if prod else "💰 **Dev Cost Estimate (AWS Free Tier):**"
+        header = f" **Production Cost Estimate{dau_str} ({tier} traffic tier)**:" if prod else " **Dev Cost Estimate (AWS Free Tier):**"
 
         return (
             header + "\n" +
