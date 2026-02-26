@@ -13,9 +13,8 @@ services:
       - terranet
 
   mcp:
-    image: node:20-slim
-    command: >
-      sh -c "npm install -g @modelcontextprotocol/inspector &&  npx @modelcontextprotocol/inspector docker run -i --rm hashicorp/terraform-mcp-server --toolsets=registry"
+    build:
+      context: ./mcp_server
     ports:
       - "8080:8080"
     environment:

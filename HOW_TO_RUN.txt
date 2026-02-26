@@ -1,0 +1,259 @@
+================================================================================
+        HOW TO RUN — TerraBot (Terraform Cloud Agent)
+================================================================================
+
+This guide covers all scenarios for running the application.
+
+================================================================================
+  PREREQUISITES
+================================================================================
+
+1. Docker & Docker Compose installed
+2. A .env file in the project root (see "Environment Variables" section below)
+3. (Optional) Python 3.11+ if running the backend locally without Docker
+
+================================================================================
+  ENVIRONMENT VARIABLES (.env file)
+================================================================================
+
+Create a .env file in the project root with the following:
+
+  # --- Required ---
+  GEMINI_API_KEY=your-gemini-api-key
+  FIREBASE_PROJECT_ID=your-firebase-project-id
+
+  # --- AWS Credentials (required for deploying infrastructure) ---
+  AWS_ACCESS_KEY_ID=your-aws-access-key
+  AWS_SECRET_ACCESS_KEY=your-aws-secret-key
+  AWS_REGION=us-east-1
+
+  # --- Optional: MCP (Terraform Registry Lookup) ---
+  ENABLE_TERRAFORM_MCP=true
+  DEPLOYMENT_MODE=development          # "development" or "production"
+
+  # --- Optional: Langfuse Tracing ---
+  LANGFUSE_PUBLIC_KEY=your-key
+  LANGFUSE_SECRET_KEY=your-secret
+  LANGFUSE_HOST=https://cloud.langfuse.com
+
+  # --- Optional: Email Alerts ---
+  SMTP_HOST=smtp.gmail.com
+  SMTP_PORT=587
+  SMTP_USER=you@gmail.com
+  SMTP_PASSWORD=app-password
+  SMTP_FROM_EMAIL=you@gmail.com
+
+  # --- Optional: Auth ---
+  REQUIRE_AUTH=true                     # set to "false" to disable auth
+  FIREBASE_API_KEY=...
+  FIREBASE_AUTH_DOMAIN=...
+
+  # --- Optional: GCP (legacy) ---
+  GCP_PROJECT_ID=...
+  GCP_REGION=us-central1
+  GCP_CREDENTIALS_PATH=./gcp-sa-key.json
+
+
+================================================================================
+  SCENARIO 1: FULL STACK WITH DOCKER COMPOSE (Recommended)
+================================================================================
+
+This starts all 3 services: Redis, MCP Server, and the API backend.
+
+  Step 1: Build and start everything
+  -----------------------------------
+    docker compose up --build -d
+
+  Step 2: Check all services are running
+  ----------------------------------------
+    docker compose ps
+
+    You should see:
+      - agent2-redis-1   ... Up (healthy)
+      - agent2-mcp-1     ... Up
+      - agent2-api-1     ... Up
+
+  Step 3: View logs
+  ------------------
+    docker compose logs -f           # all services
+    docker compose logs -f api       # just the API
+    docker compose logs -f mcp       # just the MCP server
+
+  Step 4: Access the API
+  -----------------------
+    API:   http://localhost:8000
+    Docs:  http://localhost:8000/docs
+
+  Step 5: Stop everything
+  ------------------------
+    docker compose down
+
+
+================================================================================
+  SCENARIO 2: DEVELOPMENT MODE (Backend locally, Redis + MCP in Docker)
+================================================================================
+
+Useful for fast iteration on Python code without rebuilding Docker.
+
+  Step 1: Start Redis and MCP only
+  ---------------------------------
+    docker compose up -d redis mcp
+
+  Step 2: Set DEPLOYMENT_MODE in .env
+  -------------------------------------
+    DEPLOYMENT_MODE=development
+
+    (This makes the backend connect to MCP at localhost:8080 
+     instead of the Docker network hostname "mcp:8080")
+
+  Step 3: Install Python dependencies
+  -------------------------------------
+    pip install -r requirements.txt
+
+  Step 4: Set REDIS_URL for local
+  ---------------------------------
+    set REDIS_URL=redis://localhost:6666     (PowerShell: $env:REDIS_URL="redis://localhost:6666")
+
+  Step 5: Run the backend
+  -------------------------
+    uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  Step 6: Access the API
+  -----------------------
+    API:   http://localhost:8000
+    Docs:  http://localhost:8000/docs
+
+
+================================================================================
+  SCENARIO 3: DOCKER COMPOSE — WITHOUT MCP (Simpler, No Registry Lookups)
+================================================================================
+
+If you don't need Terraform registry context gathering / validation.
+
+  Step 1: Set in .env
+  ---------------------
+    ENABLE_TERRAFORM_MCP=false
+
+  Step 2: Start only Redis and API
+  ----------------------------------
+    docker compose up --build -d redis api
+
+  The API will still generate Terraform code using Gemini, but without
+  live registry validation or context gathering.
+
+
+================================================================================
+  SCENARIO 4: REBUILD ONLY THE MCP SERVER
+================================================================================
+
+If you made changes to mcp_server/Dockerfile and need to rebuild just MCP:
+
+    docker compose up --build -d mcp
+
+  Verify it started correctly:
+    docker compose logs mcp
+
+  Expected output:
+    mcp-1  | Terraform MCP Server running on stdio
+    mcp-1  | starting server on port 8080
+
+
+================================================================================
+  SCENARIO 5: REBUILD ONLY THE API
+================================================================================
+
+If you changed Python code and want to rebuild just the API container:
+
+    docker compose up --build -d api
+
+  Verify:
+    docker compose logs --tail 20 api
+
+
+================================================================================
+  SCENARIO 6: TEST MCP CONNECTION MANUALLY
+================================================================================
+
+To verify the MCP server is reachable from your machine:
+
+    python test_mcp_connection.py
+
+  Expected output:
+    Connected! Initializing...
+    Tools: 9
+
+  This confirms the MCP SSE proxy is working and all 9 registry tools
+  are available.
+
+
+================================================================================
+  SCENARIO 7: PRODUCTION DEPLOYMENT
+================================================================================
+
+  Step 1: Set in .env
+  ---------------------
+    DEPLOYMENT_MODE=production
+    ENABLE_TERRAFORM_MCP=true
+
+  Step 2: Build and deploy
+  --------------------------
+    docker compose up --build -d
+
+  Notes:
+    - In production mode, the API connects to MCP via the Docker network
+      hostname "mcp:8080" (not localhost).
+    - Make sure to set a strong APPROVAL_TOKEN_SECRET in .env.
+    - Consider adding TLS termination via a reverse proxy (nginx, Traefik).
+
+
+================================================================================
+  ARCHITECTURE OVERVIEW
+================================================================================
+
+  ┌──────────────┐     ┌──────────────────┐     ┌──────────────┐
+  │   Frontend   │────>│   API (FastAPI)   │────>│    Redis     │
+  │  (React/Next)│     │   Port 8000       │     │   Port 6666  │
+  └──────────────┘     └────────┬─────────-┘     └──────────────┘
+                                │
+                                │ SSE (http://mcp:8080/sse)
+                                │
+                       ┌────────▼─────────┐
+                       │   MCP Server     │
+                       │  (mcp-proxy +    │
+                       │   terraform-mcp) │
+                       │   Port 8080      │
+                       └──────────────────┘
+
+  Services:
+    - Redis:  Session/state caching (port 6666)
+    - MCP:    Terraform Registry lookup via SSE (port 8080)
+    - API:    FastAPI backend with Gemini LLM (port 8000)
+
+
+================================================================================
+  COMMON ISSUES & TROUBLESHOOTING
+================================================================================
+
+  1. "No Terraform token provided" warning in MCP logs
+     → This is NORMAL. The registry toolset works without a token.
+       A token is only needed for Terraform Cloud/Enterprise features.
+
+  2. MCP connection hangs or times out
+     → Make sure the MCP container is running: docker compose ps
+     → Check logs: docker compose logs mcp
+     → Ensure port 8080 is not in use by another process.
+
+  3. "AWS credentials not set" error during apply
+     → Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in your .env
+
+  4. "GEMINI_API_KEY is required" error
+     → Set GEMINI_API_KEY in your .env file
+
+  5. "FIREBASE_PROJECT_ID is required" error
+     → Either set FIREBASE_PROJECT_ID in .env, or set REQUIRE_AUTH=false
+
+  6. MCP tools return 0 tools
+     → Restart the MCP container: docker compose restart mcp
+     → Check if the MCP image built correctly: docker compose build mcp
+
+================================================================================
