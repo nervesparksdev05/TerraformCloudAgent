@@ -372,6 +372,9 @@ class MCPManager:
                         try:
                             mcp_result = await session.call_tool(fc.name, arguments=args)
                             result_text = "\\n".join(c.text for c in mcp_result.content if c.type == "text")
+                            print(f"\n🔧 MCP TOOL RESULT — {fc.name}")
+                            print(f"   Args: {args}")
+                            print(f"   Result:\n{result_text[:3000]}\n")
                         except Exception as e:
                             logger.error("MCP Tool '%s' failed: %s", fc.name, e)
                             result_text = f"Error: {e}"
@@ -417,6 +420,7 @@ class MCPManager:
                             })
                         except Exception:
                             pass
+                    print(f"\n📦 MCP FINAL CONTEXT SUMMARY:\n{final_text}\n")
                     return final_text
         except Exception as e:
             logger.error("Failed async MCP gather: %s", e, exc_info=True)
@@ -573,6 +577,10 @@ class MCPManager:
             ok = True  # Non-blocking
 
         validation_result = ValidationResult(ok=ok, notes=notes, registry_context=registry_context)
+        print(f"\n✅ MCP VALIDATION RESULT:")
+        print(f"   OK: {ok}")
+        print(f"   Notes: {notes}")
+        print(f"   Registry docs fetched for: {list(registry_context.get('resource_docs', {}).keys())}\n")
 
         # Record validation outcome on the trace
         if trace:
