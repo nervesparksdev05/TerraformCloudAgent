@@ -466,7 +466,7 @@ async def create_run(
 
 
 @app.get("/runs/{run_id}", response_model=RunResponse)
-async def get_run(run_id: str):
+async def get_run(run_id: str, user: Dict = Depends(get_current_user)):
     run = run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
@@ -528,7 +528,7 @@ async def edit_run(
 
 
 @app.get("/runs/{run_id}/files")
-async def get_run_files(run_id: str):
+async def get_run_files(run_id: str, user: Dict = Depends(get_current_user)):
     run = run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
@@ -546,7 +546,7 @@ async def get_run_files(run_id: str):
 
 
 @app.post("/runs/{run_id}/files", response_model=RunResponse)
-async def edit_run_files(run_id: str, files: dict, background_tasks: BackgroundTasks):
+async def edit_run_files(run_id: str, files: dict, background_tasks: BackgroundTasks, user: Dict = Depends(get_current_user)):
     run = run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
@@ -567,7 +567,7 @@ async def edit_run_files(run_id: str, files: dict, background_tasks: BackgroundT
 
 
 @app.post("/runs/{run_id}/approve", response_model=RunResponse)
-async def approve_run(run_id: str, background_tasks: BackgroundTasks):
+async def approve_run(run_id: str, background_tasks: BackgroundTasks, user: Dict = Depends(get_current_user)):
     run = run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
@@ -581,7 +581,7 @@ async def approve_run(run_id: str, background_tasks: BackgroundTasks):
 
 
 @app.post("/runs/{run_id}/reject", response_model=RunResponse)
-async def reject_run(run_id: str):
+async def reject_run(run_id: str, user: Dict = Depends(get_current_user)):
     run = run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
@@ -594,7 +594,7 @@ async def reject_run(run_id: str):
 
 
 @app.post("/runs/{run_id}/destroy", response_model=RunResponse)
-async def destroy_run(run_id: str, background_tasks: BackgroundTasks):
+async def destroy_run(run_id: str, background_tasks: BackgroundTasks, user: Dict = Depends(get_current_user)):
     run = run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
@@ -606,7 +606,7 @@ async def destroy_run(run_id: str, background_tasks: BackgroundTasks):
 
 
 @app.post("/runs/{run_id}/redeploy", response_model=RunResponse)
-async def redeploy_run(run_id: str, background_tasks: BackgroundTasks):
+async def redeploy_run(run_id: str, background_tasks: BackgroundTasks, user: Dict = Depends(get_current_user)):
     run = run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")

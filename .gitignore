@@ -111,3 +111,15 @@ git_files.txt
 test_nginx.conf
 nginx.conf
 locustfile.py
+conflicts.txt
+git_conflicts.txt
+langfuse_output.txt
+langfuse_utf8_out.txt
+mypy_clean.txt
+mypy_report.txt
+py_errors.txt
+py_mcp_err.txt
+test_output.txt
+.mypy_cache/
+fix_main.py
+gcp-sa-key.json

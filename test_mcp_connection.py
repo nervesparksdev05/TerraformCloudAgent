@@ -9,6 +9,7 @@ async def main():
         async with sse_client("http://localhost:8080/sse") as (read, write):
             async with ClientSession(read, write) as session:
                 print("Connected! Initializing...")
+                print("heko")   
                 await asyncio.wait_for(session.initialize(), timeout=5)
                 tools = await session.list_tools()
                 print("Tools:", len(tools.tools))
