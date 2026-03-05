@@ -683,11 +683,12 @@ class WorkflowEngine:
     async def _run_terraform_apply(self, workspace_path: Path) -> dict:
         logger.debug("[%s] terraform apply tfplan", workspace_path.name)
         plan_file = workspace_path / "tfplan"
-        cmd = (
-            ["terraform", "apply", "-no-color", "-input=false", str(plan_file)]
-            if plan_file.exists() else
-            ["terraform", "apply", "-auto-approve", "-no-color", "-input=false"]
-        )
+        if not plan_file.exists():
+            raise FileNotFoundError(
+                f"tfplan not found in {workspace_path} — refusing to apply without a validated plan file. "
+                "Run terraform plan first."
+            )
+        cmd = ["terraform", "apply", "-no-color", "-input=false", str(plan_file)]
         await asyncio.to_thread(self._subprocess_run, cmd, workspace_path)
 
         logger.debug("[%s] terraform output", workspace_path.name)

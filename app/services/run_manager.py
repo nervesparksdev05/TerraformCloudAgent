@@ -2,6 +2,7 @@
 Service for managing run state and persistence using file-based storage
 """
 import json
+import secrets
 import shutil
 from pathlib import Path
 from datetime import datetime
@@ -24,7 +25,6 @@ class RunManager:
         """Initialize a new run workspace and state"""
         # Generate ID
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        import secrets
         run_id = f"run_{timestamp}_{secrets.token_hex(4)}"
         
         # Create workspace

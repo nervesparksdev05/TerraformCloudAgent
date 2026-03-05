@@ -207,6 +207,8 @@ async def sync_user(user: Optional[Dict] = Depends(get_current_user)):
 async def verify_auth(user: Optional[Dict] = Depends(get_current_user)):
     if not config.REQUIRE_AUTH:
         return {"authenticated": False, "message": "Authentication disabled"}
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
     return {
         "authenticated": True,
         "user": {"uid": user.get("uid"), "email": user.get("email"), "name": user.get("name")},
@@ -397,9 +399,13 @@ async def get_conversation(
 
 
 @app.get("/conversations")
-async def list_conversations(limit: int = 20, x_user_id: Optional[str] = Header(None)):
+async def list_conversations(
+    limit: int = 20,
+    user: Dict = Depends(get_current_user),
+    x_user_id: Optional[str] = Header(None),
+):
     if redis_client:
-        await check_rate_limit(x_user_id or "anonymous", redis_client)
+        await check_rate_limit(_rate_id(user, x_user_id), redis_client)
     return conversation_manager.list_sessions(limit=limit)
 
 
@@ -413,7 +419,7 @@ async def list_sessions(limit: int = 20, user: Optional[Dict] = Depends(get_curr
 
 
 @app.delete("/sessions/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, user: Dict = Depends(get_current_user)):
     try:
         if conversation_manager.delete_session(session_id):
             return {"message": "Session deleted successfully"}
@@ -429,6 +435,7 @@ async def delete_session(session_id: str):
 async def generate_terraform_from_conversation(
     session_id: str,
     background_tasks: BackgroundTasks,
+    user: Dict = Depends(get_current_user),
 ):
     session = conversation_manager.get_session(session_id)
     if not session:
@@ -450,6 +457,7 @@ async def generate_terraform_from_conversation(
 async def create_run(
     request: AgentRequest,
     background_tasks: BackgroundTasks,
+    user: Dict = Depends(get_current_user),
     x_user_id: Optional[str] = Header(None),
 ):
     if redis_client:
@@ -477,6 +485,7 @@ async def get_run(run_id: str, user: Dict = Depends(get_current_user)):
 async def chat_about_run(
     run_id: str,
     chat_request: ChatRequest,
+    user: Dict = Depends(get_current_user),
     x_user_id: Optional[str] = Header(None),
 ):
     run = run_manager.get_run(run_id)
@@ -509,6 +518,7 @@ async def edit_run(
     run_id: str,
     edit_request: ChatRequest,
     background_tasks: BackgroundTasks,
+    user: Dict = Depends(get_current_user),
     x_user_id: Optional[str] = Header(None),
 ):
     run = run_manager.get_run(run_id)

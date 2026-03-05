@@ -255,7 +255,7 @@ class EmailService:
             reject_token = self.generate_approval_token(run_id, to_email, action="reject")
             
             # Create message
-            msg = MIMEMultipart('alternative')
+            msg = MIMEMultipart('mixed')  # 'mixed' required for binary attachment
             msg['Subject'] = f'Terraform Configuration Approval Required - Run {run_id[:8]}'
             msg['From'] = f'{self.from_name} <{self.from_email}>'
             msg['To'] = to_email
@@ -286,7 +286,8 @@ class EmailService:
             # Send email
             with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
                 server.starttls()
-                server.login(self.smtp_user, self.smtp_password)
+                if self.smtp_user and self.smtp_password:
+                    server.login(self.smtp_user, self.smtp_password)
                 server.send_message(msg)
             
             logger.info(f"Approval email sent to {to_email} for run {run_id}")
@@ -359,7 +360,8 @@ class EmailService:
             
             with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
                 server.starttls()
-                server.login(self.smtp_user, self.smtp_password)
+                if self.smtp_user and self.smtp_password:
+                    server.login(self.smtp_user, self.smtp_password)
                 server.send_message(msg)
             
             logger.info(f"Confirmation email sent to {to_email}")

@@ -3,7 +3,7 @@ Pydantic models for conversational parameter extraction
 """
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -24,8 +24,8 @@ class ConversationSession(BaseModel):
     status: ConversationStatus = Field(default=ConversationStatus.ACTIVE)
     run_ids: List[str] = Field(default_factory=list, description="List of run IDs generated from this session")
     last_trace_id: Optional[str] = Field(None, description="Langfuse trace ID from the last LLM call, used to link feedback")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     class Config:
         use_enum_values = True
