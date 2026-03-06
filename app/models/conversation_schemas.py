@@ -18,6 +18,8 @@ class ConversationSession(BaseModel):
     """Conversation session state"""
     session_id: str = Field(..., description="Unique session identifier")
     provider: str = Field(default="aws", description="Cloud provider")
+    user_id: Optional[str] = Field(None, description="Firebase UID of the user who created this session")
+    username: Optional[str] = Field(None, description="Username of the user who created this session")
     messages: List[Dict[str, str]] = Field(default_factory=list)
     collected_parameters: Dict[str, Any] = Field(default_factory=dict)
     is_complete: bool = Field(default=False)

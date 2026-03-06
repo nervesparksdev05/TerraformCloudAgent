@@ -404,11 +404,13 @@ class ConversationManager:
         repo: str = "",
         github_token: str = "",
         github_branch: str = "",
+        user_id: Optional[str] = None,
+        username: Optional[str] = None,
     ) -> Dict[str, Any]:
         if self.sessions_collection is None:
             raise RuntimeError("MongoDB not available.")
 
-        sid = f"terrf_{datetime.now():%Y%m%d_%H%M%S}_{secrets.token_hex(4)}"
+        sid = f"terrf@_{datetime.now():%Y%m%d_%H%M%S}_{secrets.token_hex(4)}"
 
         if not owner.strip() or not repo.strip():
             return {
@@ -432,7 +434,7 @@ class ConversationManager:
                 "suggestions": ["Retry with token", "Change branch"],
             }
 
-        analysis  = await self._analyze_readme(readme)
+        analysis  = await self._analyze_readme(readme, session_id=sid, user_id=user_id, username=username)
         extracted = analysis.get("extracted_params", {})
 
         svcs = extracted.get("detected_services", [])
@@ -454,6 +456,8 @@ class ConversationManager:
         greeting = str(analysis.get("message") or "Should we target **Development** or **Production**?")
         session = ConversationSession(
             session_id=sid, provider="aws",
+            user_id=user_id,
+            username=username,
             messages=[{"role": "assistant", "content": greeting}],
             collected_parameters=extracted,
             is_complete=False, status=ConversationStatus.ACTIVE,
@@ -659,6 +663,8 @@ class ConversationManager:
         trace = langfuse_service.create_trace(
             name="Conversation Turn",
             session_id=session.session_id,
+            user_id=session.user_id,
+            username=session.username,
             input=messages,
         )
 
@@ -832,12 +838,15 @@ class ConversationManager:
 
     # ── README analysis ────────────────────────────────────────────────────────
 
-    async def _analyze_readme(self, readme: str) -> Dict[str, Any]:
+    async def _analyze_readme(self, readme: str, session_id: str = None, user_id: str = None, username: str = None) -> Dict[str, Any]:
         readme_input = [{"role": "user", "content": _README_PROMPT + readme[:18000]}]
 
         # Create Langfuse trace with full input (README prompt)
         trace = langfuse_service.create_trace(
             name="README Analysis",
+            session_id=session_id,
+            user_id=user_id,
+            username=username,
             input=readme_input,
         )
 
@@ -988,6 +997,10 @@ class ConversationManager:
             alert_email = ""
 
         return {
+            # Identity — forwarded to Langfuse so all downstream traces share the session
+            "session_id":           session_id,
+            "user_id":              s.user_id,
+            "username":             s.username,
             "cloud_provider":       "aws",
             "environment":          p.get("environment", "dev"),
             "project_name":         p.get("project_name") or p.get("github_repo") or "app",

@@ -233,9 +233,14 @@ async def create_conversation(
         await check_rate_limit(_rate_id(user, x_user_id), redis_client)
 
     try:
+        # Extract user_id and username from authenticated user
+        user_id = user.get("uid") if user else None
+        username = user.get("email") if user else None
+        
         result = await conversation_manager.create_session(
             owner=owner, repo=repo,
             github_token=github_token, github_branch=github_branch,
+            user_id=user_id, username=username,
         )
         return ConversationCreateResponse(
             session_id=result["session_id"],
@@ -371,7 +376,8 @@ async def submit_feedback(
             trace = langfuse_service.create_trace(
                 name="user-feedback-submission",
                 session_id=session_id,
-                user_id="terraform",
+                user_id=session.user_id,
+                username=session.username,
                 input={"rating": feedback.rating, "comment": feedback.comment}
             )
             if trace:
@@ -506,7 +512,16 @@ async def chat_about_run(
             f"PLAN:\n{run.plan_output or 'Not available'}\n\n"
             f"QUESTION: {chat_request.message}"
         )
-        text = await llm_generator.chat_about_plan(context)
+        # Extract session identity so the Langfuse trace links to the user
+        _session_id = (run.metadata or {}).get("session_id")
+        _user_id = user.get("uid") if user else None
+        _username = user.get("email") if user else None
+        text = await llm_generator.chat_about_plan(
+            context,
+            session_id=_session_id,
+            user_id=_user_id,
+            username=_username,
+        )
         return ChatResponse(response=text, timestamp=datetime.now().isoformat())
     except Exception as e:
         logger.error("[%s] chat_about_run failed: %s", run_id, e, exc_info=True)

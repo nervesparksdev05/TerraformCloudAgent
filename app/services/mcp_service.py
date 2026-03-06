@@ -310,11 +310,27 @@ class MCPManager:
 
         from app.services import langfuse_service
 
+        # Try to enrich trace with user info from the conversation session (best-effort)
+        _user_id = None
+        _username = None
+        if session_id:
+            try:
+                from app.services.conversation_manager import ConversationManager
+                _cm = ConversationManager()
+                _sess = _cm.get_session(session_id)
+                if _sess:
+                    _user_id = getattr(_sess, "user_id", None)
+                    _username = getattr(_sess, "username", None)
+            except Exception:
+                pass
+
         # Create trace for context gathering
         trace = langfuse_service.create_trace(
             name="mcp-context-gather",
             session_id=session_id,
-            input=prompt
+            user_id=_user_id,
+            username=_username,
+            input=prompt,
         )
 
         try:
@@ -451,7 +467,13 @@ class MCPManager:
 
     # ── Terraform registry validation (post-generation) ───────────────────────
 
-    async def validate_terraform(self, main_tf: str) -> ValidationResult:
+    async def validate_terraform(
+        self,
+        main_tf: str,
+        session_id: str = None,
+        user_id: str = None,
+        username: str = None,
+    ) -> ValidationResult:
         """
         Post-generation validation using the Terraform MCP registry.
 
@@ -473,6 +495,9 @@ class MCPManager:
 
         trace = langfuse_service.create_trace(
             name="MCP Validation",
+            session_id=session_id,
+            user_id=user_id,
+            username=username,
             input={"resource_types": list(set(resource_types_found))[:8],
                    "main_tf_length": len(main_tf or "")},
         )

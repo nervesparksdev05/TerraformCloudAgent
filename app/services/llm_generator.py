@@ -108,11 +108,16 @@ RULES:
         pipeline_trace = langfuse_service.create_trace(
             name="Terraform Pipeline",
             session_id=session_id,
-            input={"params": {k: v for k, v in params.items() if k != "readme_context"},
-                   "prompt_length": len(user_prompt)},
+             user_id=params.get("user_id"),
+             username=params.get("username"),
+             input={"params": {k: v for k, v in params.items() if k != "readme_context"},
+                 "prompt_length": len(user_prompt)},
         )
 
-# 1. Gather MCP context (async version)
+        user_id  = params.get("user_id")
+        username = params.get("username")
+
+        # 1. Gather MCP context (async version)
         mcp_context = await mcp_manager.gather_registry_context(user_prompt, session_id)
 
         if mcp_context:
@@ -123,13 +128,13 @@ RULES:
             )
 
         # 2. Call LLM (async)
-        bundle = await self._call(user_prompt, session_id=session_id)
+        bundle = await self._call(user_prompt, session_id=session_id, user_id=user_id, username=username)
 
         # 3. Generate GitHub workflow
         bundle.github_workflow_yaml = self._generate_workflow(session_id=session_id)
 
-        # 4. Post-process async
-        result = await self._post_process_async(bundle)
+        # 4. Post-process async (pass identity so MCP validation traces share the session)
+        result = await self._post_process_async(bundle, session_id=session_id, user_id=user_id, username=username)
 
         # Record final TF files on the pipeline trace
         if pipeline_trace:
@@ -153,6 +158,8 @@ RULES:
         feedback: str,
         readme_context: str = "",
         session_id: str = None,
+        user_id: str = None,
+        username: str = None,
     ) -> TerraformBundle:
         prompt = (
             f"README context:\n{readme_context}\n\n"
@@ -161,9 +168,16 @@ RULES:
             f"Current Terraform:\n{json.dumps(current_code, indent=2)}\n\n"
             "Apply all feedback. Return JSON: {main_tf, variables_tf, outputs_tf}."
         )
-        return await self._call(prompt, session_id=session_id)
+        return await self._call(prompt, session_id=session_id, user_id=user_id, username=username)
 
-    async def diagnose_error(self, error_msg: str, terraform_code: dict) -> dict:
+    async def diagnose_error(
+        self,
+        error_msg: str,
+        terraform_code: dict,
+        session_id: str = None,
+        user_id: str = None,
+        username: str = None,
+    ) -> dict:
         system = (
             "You are a Senior AWS Cloud Architect diagnosing a Terraform deployment failure.\n"
             "Return ONLY JSON:\n"
@@ -175,6 +189,9 @@ RULES:
 
         trace = langfuse_service.create_trace(
             name="Diagnose Error",
+            session_id=session_id,
+            user_id=user_id,
+            username=username,
             input=messages,
         )
 
@@ -203,9 +220,16 @@ RULES:
                     trace.update(output=json.dumps(fallback), level="ERROR", status_message=str(e))
                 except Exception:
                     pass
+
             return fallback
 
-    async def chat_about_plan(self, context: str) -> str:
+    async def chat_about_plan(
+        self,
+        context: str,
+        session_id: str = None,
+        user_id: str = None,
+        username: str = None,
+    ) -> str:
         messages = [
             {"role": "system", "content": (
                 "You are a helpful AWS Terraform expert. Answer questions about Terraform plans "
@@ -216,6 +240,9 @@ RULES:
 
         trace = langfuse_service.create_trace(
             name="Chat About Plan",
+            session_id=session_id,
+            user_id=user_id,
+            username=username,
             input=messages,
         )
 
@@ -427,7 +454,7 @@ jobs:
         run: terraform apply -auto-approve tfplan
 """
 
-    async def _call(self, user_prompt: str, session_id: str = None) -> TerraformBundle:
+    async def _call(self, user_prompt: str, session_id: str = None, user_id: str = None, username: str = None) -> TerraformBundle:
         messages = [
             {"role": "system", "content": self._SYSTEM},
             {"role": "user",   "content": user_prompt},
@@ -436,6 +463,8 @@ jobs:
         trace = langfuse_service.create_trace(
             name="Terraform Generation",
             session_id=session_id,
+            user_id=user_id,
+            username=username,
             input=messages,
         )
 
@@ -646,12 +675,23 @@ jobs:
         logger.debug("_sanitize_bundle: all 12 fixes applied successfully.")
         return bundle
 
-    async def validate_with_mcp(self, bundle: TerraformBundle) -> ValidationResult:
+    async def validate_with_mcp(
+        self,
+        bundle: TerraformBundle,
+        session_id: str = None,
+        user_id: str = None,
+        username: str = None,
+    ) -> ValidationResult:
         """
         Post-generation validation using the Terraform MCP registry.
         Delegates to mcp_manager.validate_terraform().
         """
-        return await mcp_manager.validate_terraform(bundle.main_tf)
+        return await mcp_manager.validate_terraform(
+            bundle.main_tf,
+            session_id=session_id,
+            user_id=user_id,
+            username=username,
+        )
 
     def _post_process(self, bundle: TerraformBundle) -> TerraformBundle:
         """Run terraform fmt + validate if CLI is available."""
@@ -688,6 +728,9 @@ jobs:
         self,
         bundle: TerraformBundle,
         validation: ValidationResult,
+        session_id: str = None,
+        user_id: str = None,
+        username: str = None,
     ) -> TerraformBundle:
         """
         If MCP validation collected registry docs (or found issues), call the LLM
@@ -750,6 +793,9 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
 
         trace = langfuse_service.create_trace(
             name="Terraform Auto-Fix",
+            session_id=session_id,
+            user_id=user_id,
+            username=username,
             input=messages,
         )
 
@@ -796,7 +842,13 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
                     pass
             return bundle
 
-    async def _post_process_async(self, bundle: TerraformBundle) -> TerraformBundle:
+    async def _post_process_async(
+        self,
+        bundle: TerraformBundle,
+        session_id: str = None,
+        user_id: str = None,
+        username: str = None,
+    ) -> TerraformBundle:
         """
         Full async post-generation pipeline:
           1. terraform fmt  (thread)
@@ -810,7 +862,12 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
         if not config.ENABLE_TERRAFORM_MCP:
             return bundle
 
-        validation = await self.validate_with_mcp(bundle)
+        validation = await self.validate_with_mcp(
+            bundle,
+            session_id=session_id,
+            user_id=user_id,
+            username=username,
+        )
         for note in validation.notes:
             logger.info("MCP validation: %s", note)
 
@@ -823,7 +880,13 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
             else:
                 logger.info("MCP registry context available — running auto-fix for best-practice alignment.")
 
-            bundle = await self._auto_fix_with_mcp(bundle, validation)
+            bundle = await self._auto_fix_with_mcp(
+                bundle,
+                validation,
+                session_id=session_id,
+                user_id=user_id,
+                username=username,
+            )
             bundle = await asyncio.to_thread(self._post_process, bundle)
 
         return bundle

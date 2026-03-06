@@ -71,6 +71,7 @@ def create_trace(
     name: str = "llm-call",
     session_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    username: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
     input: Optional[Any] = None,
     output: Optional[Any] = None,
@@ -80,11 +81,18 @@ def create_trace(
         logger.debug("Langfuse disabled — skipping create_trace")
         return None
     try:
+        # Ensure metadata is a dict and include username when provided so
+        # Langfuse stores a readable username in the trace metadata.
+        _metadata = dict(metadata or {})
+        if username:
+            # prefer explicit `username` key so it's easy to find in Langfuse
+            _metadata.setdefault("username", username)
+
         kwargs = {
             "name": name,
             "session_id": session_id,
             "user_id": user_id,
-            "metadata": metadata or {},
+            "metadata": _metadata,
         }
         if input is not None:
             kwargs["input"] = input

@@ -190,6 +190,8 @@ class WorkflowEngine:
                 tf_trace = langfuse_service.create_trace(
                     name="Generated Terraform Files",
                     session_id=session_id,
+                    user_id=(params.get("user_id") if isinstance(params, dict) else None),
+                    username=(params.get("username") if isinstance(params, dict) else None),
                     input={
                         "run_id": run_id,
                         "is_refinement": bool(feedback),
@@ -373,9 +375,15 @@ class WorkflowEngine:
             if workspace_path:
                 tf_files = self.workspace_manager.read_terraform_files(workspace_path)
             run = self.run_manager.get_run(run_id)
+            # Extract session identity from original request for Langfuse tracing
+            _orig = self._load_original_request(run_id)
+            _req_params = _orig.request if isinstance(_orig.request, dict) else {}
             diagnosis = await self.llm_generator.diagnose_error(
                 error_msg=f"STDOUT:\n{stdout}\nSTDERR:\n{stderr}",
                 terraform_code=tf_files,
+                session_id=_req_params.get("session_id"),
+                user_id=_req_params.get("user_id"),
+                username=_req_params.get("username"),
             )
             if run:
                 run.status = RunStatus.FAILED
