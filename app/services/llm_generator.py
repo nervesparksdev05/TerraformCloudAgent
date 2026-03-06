@@ -1,15 +1,16 @@
-"""llm_generator.py — TerraBot: AWS Free Tier Terraform generator powered by Gemini."""
+"""llm_generator.py — TerraBot: Multi-cloud Terraform generator (AWS / GCP / DigitalOcean) powered by Gemini."""
 from __future__ import annotations
 
 import asyncio
 import json
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
 
 from app.services.llm_service import LLMService, AsyncLLMService
+# ValidationResult lives in mcp_service — import from there to avoid duplication
+from app.services.mcp_service import ValidationResult, mcp_manager
 from app.core import config
 from app.core.logger import get_logger
 from app.models.schemas import TerraformBundle
@@ -17,17 +18,8 @@ from app.models.schemas import TerraformBundle
 logger = get_logger(__name__)
 
 
-@dataclass
-class ValidationResult:
-    """Result from MCP-based Terraform registry validation."""
-    ok: bool = True
-    notes: List[str] = field(default_factory=list)
-    # Live registry data collected during validation — passed to auto-fix LLM call
-    registry_context: Dict[str, Any] = field(default_factory=dict)
-
-
 class LLMGenerator:
-    """Generate production-grade AWS Free Tier Terraform files from conversation parameters."""
+    """Generate production-grade Terraform files for AWS, GCP, and DigitalOcean from conversation parameters."""
 
     _SYSTEM = """\
 You are a senior AWS Terraform engineer specialising in the AWS Free Tier. Generate complete, production-ready Terraform for AWS.
@@ -76,6 +68,102 @@ RULES:
 - Return ONLY valid JSON: {"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."}
 """
 
+    _DO_SYSTEM = """\
+You are a senior DigitalOcean Terraform engineer. Generate complete, production-ready Terraform for DigitalOcean.
+
+== REQUIRED PROVIDER BLOCK ==
+1. EVERY generated main.tf MUST start with:
+   terraform {
+     required_providers {
+       digitalocean = { source = "digitalocean/digitalocean", version = "~> 2.0" }
+     }
+   }
+   provider "digitalocean" { token = var.do_token }
+
+== REQUIRED VARIABLES ==
+2. Always declare these in variables.tf:
+   - do_token      (sensitive = true, no default)
+   - do_region     (default = "nyc3")
+   - project_name
+   - environment
+   - ssh_key_name  (the DO SSH key name, not fingerprint)
+   - alert_email
+
+== SSH KEY LOOKUP ==
+3. ALWAYS look up the SSH key by name using a data source:
+   data "digitalocean_ssh_key" "main" { name = var.ssh_key_name }
+   Reference: data.digitalocean_ssh_key.main.id
+   NEVER hardcode a fingerprint or ID.
+
+== DROPLET ==
+4. Use resource "digitalocean_droplet" with:
+   - image = "ubuntu-22-04-x64"
+   - region = var.do_region
+   - size = var.droplet_size
+   - ssh_keys = [data.digitalocean_ssh_key.main.id]
+   - Name pattern: {project_name}-{environment}-app-{count.index}
+
+== VPC ==
+5. Always create a digitalocean_vpc:
+   - name: {project_name}-{environment}-vpc
+   - region: var.do_region
+   - ip_range: "10.10.0.0/16"
+
+== FIREWALL ==
+6. Always create a digitalocean_firewall with:
+   - Allow inbound: 80/TCP, 443/TCP from 0.0.0.0/0
+   - Allow inbound: 22/TCP from var.ssh_allowed_cidrs (default = ["0.0.0.0/0"] for DO, user restricts)
+   - Allow all outbound
+
+== LOAD BALANCER ==
+7. When use_alb = true, create a digitalocean_loadbalancer:
+   - forwarding_rule: entry_port=80 → target_port=80
+   - healthcheck: port=var.health_check_port, path=var.health_check_path
+   - region = var.do_region
+   - Attach all Droplets via droplet_ids
+
+== MANAGED DATABASE ==
+8. For SQL: use resource "digitalocean_database_cluster" with engine and version.
+   For Redis: use engine = "redis".
+   Always use private_network_uuid = digitalocean_vpc.main.id
+
+== SPACES ==
+9. If storage_needs = true:
+   - resource "digitalocean_spaces_bucket" with region = var.do_region
+   - Optionally add digitalocean_spaces_bucket_cors_configuration
+
+== DOMAIN / DNS ==
+10. If custom_domain is set:
+    - resource "digitalocean_domain" for the root domain
+    - resource "digitalocean_record" A records pointing to Droplet IP or LB IP
+
+== MONITORING ALERTS ==
+11. If alert_email is set:
+    - resource "digitalocean_monitor_alert" for CPU utilization > 80%
+    - alerts block: email = [var.alert_email]
+
+== PROJECT GROUPING ==
+12. Always create a digitalocean_project to group all resources logically.
+
+== STARTUP SCRIPT ==
+13. User data for Droplet (same pattern as AWS):
+    - #!/bin/bash, set -e
+    - Install deps, clone repo, write .env, start app with systemd
+    - Use ${var.VARIABLE_NAME} for Terraform variables in user_data (templatefile-style)
+    - Use $${BASH_VAR} for Bash shell variables
+
+== NAMING ==
+14. Pattern: {project_name}-{environment}-{resource_type}
+
+== SECRET HANDLING ==
+15. Secret env vars default to "" in variables.tf and are written to .env as placeholders.
+
+== OUTPUTS ==
+16. Output: Droplet IPs, LB IP, database connection string, Spaces endpoint.
+
+RETURN ONLY valid JSON: {"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."}
+"""
+
     def __init__(self) -> None:
         self.llm_service = AsyncLLMService()
 
@@ -98,7 +186,39 @@ RULES:
             if k in params and not isinstance(params[k], list):
                 params[k] = []
 
-        bundle = await self._call(self._build_prompt(params))
+        prompt = self._build_prompt(params)
+
+        # ── Pre-generation: gather live Terraform Registry context via MCP ──
+        # This calls terraform-mcp-server (stdio subprocess) which queries
+        # registry.terraform.io for provider versions and resource schemas.
+        # The summary is prepended to the prompt so the LLM uses accurate,
+        # up-to-date argument names when generating the .tf files.
+        registry_context = ""
+        if config.ENABLE_TERRAFORM_MCP:
+            try:
+                session_id = params.get("session_id")
+                registry_context = await mcp_manager.gather_registry_context(
+                    prompt, session_id=session_id
+                )
+                if registry_context:
+                    logger.info("MCP registry context gathered (%d chars)", len(registry_context))
+            except Exception as e:
+                logger.warning("MCP pre-generation context gathering failed: %s — continuing without.", e)
+
+        if registry_context:
+            prompt = (
+                "LIVE TERRAFORM REGISTRY CONTEXT (from registry.terraform.io):\n"
+                f"{registry_context}\n\n"
+                "Use the above registry data to ensure correct provider version constraints\n"
+                "and accurate resource argument names in the generated code.\n\n"
+                + prompt
+            )
+
+        # Select system prompt based on provider
+        provider = str(params.get("cloud_provider", "aws")).lower()
+        system_prompt = self._DO_SYSTEM if provider == "digitalocean" else self._SYSTEM
+
+        bundle = await self._call(prompt, system=system_prompt)
         return await self._post_process_async(bundle)
 
     async def refine_terraform(
@@ -155,6 +275,14 @@ RULES:
     # ── Prompt builder ─────────────────────────────────────────────────────────
 
     def _build_prompt(self, p: Dict[str, Any]) -> str:
+        provider = str(p.get("cloud_provider", "aws")).lower()
+        if provider == "digitalocean":
+            return self._build_do_prompt(p)
+        # Default: AWS (and fallback for GCP — handled in workflow_engine which calls gcp_generator)
+        return self._build_aws_prompt(p)
+
+    def _build_aws_prompt(self, p: Dict[str, Any]) -> str:
+        """Build the AWS-specific Terraform generation prompt."""
         is_prod        = str(p.get("environment", "dev")).lower() in ("prod", "production")
         github_owner   = p.get("github_owner", "")
         github_repo    = p.get("github_repo", "")
@@ -300,12 +428,108 @@ STARTUP SCRIPT MUST:
 Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."}}
 """
 
+    # ── DO Prompt builder ──────────────────────────────────────────────────────
+
+    def _build_do_prompt(self, p: Dict[str, Any]) -> str:
+        """Build the DigitalOcean-specific Terraform generation prompt."""
+        is_prod       = str(p.get("environment", "dev")).lower() in ("prod", "production")
+        github_owner  = p.get("github_owner", "")
+        github_repo   = p.get("github_repo", "")
+        project_name  = p.get("project_name") or github_repo or "app"
+        region        = p.get("do_region") or p.get("region") or "nyc3"
+        droplet_size  = p.get("droplet_size") or ("s-1vcpu-2gb" if is_prod else "s-1vcpu-1gb")
+        instance_count = int(p.get("instance_count", 1) or 1)
+
+        has_db     = p.get("has_database", False)
+        db_type    = p.get("database_type", "none")
+        db_hosting = p.get("database_hosting_model", "managed_cloud")
+        has_cache  = p.get("has_cache", False)
+        has_lb     = p.get("use_alb", False) or (is_prod and instance_count > 1)
+        has_bkt    = p.get("storage_needs", False)
+        use_asg    = p.get("use_asg", False)
+
+        env_lines = [
+            f"  - {ev.get('name')} [{ev.get('category','other')}]: {ev.get('description','')} {'(secret)' if ev.get('is_secret') else ''}"
+            for ev in (p.get("required_env_vars") or []) if isinstance(ev, dict)
+        ] + [
+            f"  - {ev.get('name')} [optional]: {ev.get('description','')}"
+            for ev in (p.get("optional_env_vars") or []) if isinstance(ev, dict)
+        ]
+        env_block = "\n".join(env_lines) or "  None specified."
+
+        ports_block = "\n".join(
+            f"  - {e.get('port')}/{e.get('protocol','tcp')} ({e.get('description','')})"
+            for e in (p.get("ports") or []) if isinstance(e, dict)
+        ) or "  - 80/tcp public (HTTP)\n  - 443/tcp public (HTTPS)"
+
+        readme_ctx = (p.get("readme_context") or "")[:5000] or "Not available."
+        alert_email = p.get("alert_email", "")
+        ssh_key    = p.get("ssh_key_name", "")
+        custom_domain = p.get("custom_domain", "")
+        hc_path    = (p.get("autoscaling_config") or {}).get("health_check_path", "/")
+        domain_line = f"  custom_domain : {custom_domain}" if custom_domain else "  custom_domain : (none)"
+
+        return f"""
+PROVIDER: DigitalOcean
+PROJECT: {project_name}  (github.com/{github_owner}/{github_repo})
+ENVIRONMENT: {p.get('environment', 'dev').upper()}
+
+README CONTEXT (source of truth for startup script and env vars):
+{readme_ctx}
+
+STACK:
+  Language/Framework : {p.get('language', 'Not specified')}
+  Database           : {'YES - ' + db_type + ' (' + db_hosting + ')' if has_db else 'None'}
+  Cache              : {'YES - Redis (DO Managed)' if has_cache else 'None'}
+  File Storage       : {'YES - DO Spaces' if has_bkt else 'None'}
+  Background Jobs    : {'YES' if p.get('background_jobs') else 'None'}
+  Process Manager    : {p.get('process_manager', 'auto-detect')}
+
+DIGITALOCEAN INFRASTRUCTURE:
+  do_region        : {region}
+  droplet_size     : {droplet_size}
+  droplet_image    : ubuntu-22-04-x64
+  instance_count   : {instance_count}
+  ssh_key_name     : {ssh_key or 'REQUIRED - must exist in DO account'}
+  alert_email      : {alert_email or '(none)'}
+{domain_line}
+  load_balancer    : {'YES - DO LB, health check: ' + hc_path if has_lb else 'NO'}
+  storage (spaces) : {'YES' if has_bkt else 'NO'}
+  do_spaces_bucket : {p.get('do_spaces_bucket', '') or '(auto-generated)'}
+  use_asg          : {use_asg}
+  enable_multi_az  : {p.get('enable_multi_az', False)}
+
+PORTS TO EXPOSE:
+{ports_block}
+
+ENVIRONMENT VARIABLES:
+{env_block}
+
+KEY CONSTRAINTS:
+- NEVER hardcode the DO token — always var.do_token
+- ALWAYS look up SSH key via data "digitalocean_ssh_key" {{ name = var.ssh_key_name }}
+- Use count = {instance_count} for digitalocean_droplet resources
+- Tag all resources: project = {project_name}, environment = {p.get('environment', 'dev')}
+- Use var.do_region for ALL region arguments (Droplet, DB, Spaces, LB)
+- Install command : {p.get('install_command') or 'auto-detect'}
+- Start command   : {p.get('app_start_command') or 'auto-detect'}
+
+WORKFLOW:
+  1. Clone repo from https://github.com/{github_owner}/{github_repo}
+  2. Install deps: {p.get('install_command') or 'auto-detect'}
+  3. Write env vars to .env using Terraform variable interpolation
+  4. Create systemd service (HARDCODED paths: WorkingDirectory=/home/ubuntu/app)
+  5. systemctl daemon-reload + enable + start
+
+Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."}}
+"""
+
     # ── Internals ──────────────────────────────────────────────────────────────
 
-    async def _call(self, user_prompt: str) -> TerraformBundle:
+    async def _call(self, user_prompt: str, system: str | None = None) -> TerraformBundle:
         raw = await self.llm_service.chat_completion(
             messages=[
-                {"role": "system", "content": self._SYSTEM},
+                {"role": "system", "content": system or self._SYSTEM},
                 {"role": "user",   "content": user_prompt},
             ],
             temperature=0.1, max_tokens=8192,
@@ -484,7 +708,15 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
 
     async def validate_with_mcp(self, bundle: TerraformBundle) -> ValidationResult:
         """
-        Post-generation validation using the Terraform MCP registry.
+        Post-generation validation using the Terraform Registry MCP server.
+        Delegates to mcp_service.mcp_manager.validate_terraform().
+        """
+        return await mcp_manager.validate_terraform(bundle.main_tf)
+
+    async def _validate_with_mcp_legacy(self, bundle: TerraformBundle) -> ValidationResult:
+        """
+        [LEGACY — kept for reference only. Use validate_with_mcp() above.]
+        Old inline implementation; replaced by delegation to mcp_manager.
         """
         if not config.ENABLE_TERRAFORM_MCP:
             logger.debug("validate_with_mcp: ENABLE_TERRAFORM_MCP=False — skipping.")

@@ -379,12 +379,13 @@ class AsyncLLMService(LLMService):
                 self._model_name, messages, temperature, max_tokens, response_format, timeout,
             )
 
-        # Convert MCP tools to Gemini format
+        # Convert MCP tools to Gemini format (sanitize schemas for Gemini compatibility)
+        from app.services.mcp_service import sanitize_schema
         gemini_tools = [{"function_declarations": [
             {
                 "name": t["name"],
                 "description": t["description"],
-                "parameters": t["input_schema"]
+                "parameters": sanitize_schema(t["input_schema"]) if isinstance(t["input_schema"], dict) else t["input_schema"]
             } for t in all_mcp_tools
         ]}]
 

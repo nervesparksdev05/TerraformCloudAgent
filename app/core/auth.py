@@ -111,22 +111,4 @@ async def get_current_user(
     return user
 
 
-async def get_optional_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(security)
-) -> Optional[Dict]:
-    """
-    FastAPI dependency to optionally get the current user.
-    Returns None if no token is provided or authentication is disabled.
-    Does not raise an error if token is missing.
-    
-    Useful for endpoints that work differently for authenticated vs anonymous users.
-    """
-    if not config.REQUIRE_AUTH or not credentials:
-        return None
-    
-    try:
-        token = credentials.credentials
-        user = await verify_firebase_token(token)
-        return user
-    except HTTPException:
-        return None
+
