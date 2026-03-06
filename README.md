@@ -1,6 +1,6 @@
-# 🚀 TerraformCloudAgent
+# 🤖 TerraBot — Multi-Cloud Infrastructure Agent
 
-An AI-powered, conversational infrastructure generator that reads your GitHub repository's README and generates production-ready Terraform code for AWS, GCP, Azure, and DigitalOcean — with a full lifecycle management UI.
+An AI-powered, conversational infrastructure generator that reads your GitHub repository's README and generates production-ready Terraform code for **AWS**, **GCP**, and **DigitalOcean** — with a full lifecycle management UI.
 
 ---
 
@@ -20,10 +20,10 @@ An AI-powered, conversational infrastructure generator that reads your GitHub re
 
 ## 🎯 Overview
 
-TerraformCloudAgent is a **README-driven, conversational infrastructure generator** that:
+TerraBot is a **README-driven, conversational infrastructure generator** that:
 
 1. **Reads your GitHub repository's README** to understand your project (supports private repos via token)
-2. **Asks intelligent, context-aware questions** (10–12 for production, 4–6 for dev)
+2. **Asks concise, intelligent questions** (4–5 lines each) in a guided conversation
 3. **Generates production-grade Terraform code** with security best practices baked in
 4. **Lets you edit files inline** or request AI-driven re-generation with natural language feedback
 5. **Deploys infrastructure** with full lifecycle management (plan, approve, apply, destroy)
@@ -34,10 +34,9 @@ TerraformCloudAgent is a **README-driven, conversational infrastructure generato
 
 | Provider | Compute | Networking | IAM |
 |---|---|---|---|
-| **AWS** | EC2 | VPC, Subnets, IGW, SGs | IAM Roles (10 types), Instance Profiles |
+| **AWS** | EC2 (+ ASG + ALB) | VPC, Subnets, IGW, SGs | IAM Roles (10 types), Instance Profiles |
 | **GCP** | Compute Engine | VPC, Subnets, Firewall Rules | Service Accounts |
-| **Azure** | Virtual Machines | VNet, Subnets, NSGs | Managed Identity |
-| **DigitalOcean** | Droplets | Firewall | SSH Keys |
+| **DigitalOcean** | Droplets | VPC, Firewall | SSH Keys (data source lookup) |
 
 ---
 
@@ -45,19 +44,21 @@ TerraformCloudAgent is a **README-driven, conversational infrastructure generato
 
 ### 🤖 Intelligent Conversation System
 - **README-First Analysis**: Detects languages, frameworks, databases, ports, and dependencies automatically
-- **Environment-Aware Questioning**: Dev (4–6 questions, cost-focused) vs Production (10–12 questions, reliability-focused)
+- **Environment-Aware Questioning**: Dev (4–6 questions) vs Production (10–14 questions)
+- **Concise Responses**: Every bot message is strictly 4–5 lines — no walls of text
 - **Streaming Responses**: Real-time token streaming via Server-Sent Events
 - **Turn Guidance System**: AI knows exactly which question to ask next based on conversation state
 
 ### 🔐 Authentication & User Management
 - **Firebase Authentication**: Email/password sign-up and sign-in
 - **Google OAuth**: One-click "Continue with Google" via Firebase SDK popup
-- **MongoDB User Sync**: Every login (email or Google) upserts a user record in the `users` collection
+- **MongoDB User Sync**: Every login upserts a user record in the `users` collection
 - **Protected API**: All endpoints require a valid Firebase Bearer token
 
 ### 🏗️ Production-Grade Code Generation
 - **Three Terraform Files**: `main.tf`, `variables.tf`, `outputs.tf`
 - **GitHub Actions CI/CD**: Auto-generated `deploy.yml` for each cloud provider
+- **Provider-Specific Prompts**: Dedicated LLM prompts per provider (AWS / GCP / DigitalOcean)
 - **User Data Scripts**: Clones your GitHub repo, installs dependencies, starts the app
 - **Docker Support**: Detects Docker in README and generates Docker-based deployment
 - **Terraform Validation**: Runs `terraform fmt` and `terraform validate` on generated code
@@ -160,33 +161,47 @@ npm run dev
 ## 🔧 Environment Variables
 
 ```bash
-# ── LLM ──────────────────────────────────────────────
-GEMINI_API_KEY=...                    # Required
+# ── 1. Core AI & Provider ─────────────────────────────────────────────────────
 LLM_PROVIDER=gemini
+GEMINI_API_KEY=...                    # Required
 
-# ── Database ─────────────────────────────────────────
+# ── 2. Cloud Providers ────────────────────────────────────────────────────────
+
+# --- AWS ---
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+
+# --- DigitalOcean ---
+DO_TOKEN=dop_v1_...                   # Required for DigitalOcean deployments
+
+# --- GCP ---
+GCP_PROJECT_ID=...
+GCP_CREDENTIALS_PATH=./gcp-sa-key.json
+
+# --- GitHub (private repos) ---
+# GITHUB_TOKEN=ghp_...
+
+# ── 3. Authentication (Firebase) ──────────────────────────────────────────────
+REQUIRE_AUTH=true
+FIREBASE_PROJECT_ID=your-project-id
+FIREBASE_SERVICE_ACCOUNT_PATH=./your-firebase-adminsdk.json
+
+# ── 4. Database & Persistence ─────────────────────────────────────────────────
 MONGODB_URI=mongodb://localhost:27017
 MONGODB_DATABASE=terraform_agent
 
-# ── Firebase Auth ─────────────────────────────────────
-REQUIRE_AUTH=true
-FIREBASE_PROJECT_ID=your-project-id
-FIREBASE_CREDENTIALS_PATH=./your-firebase-adminsdk.json
-
-# ── Email Approvals ───────────────────────────────────
+# ── 5. Email Approvals (SMTP) ─────────────────────────────────────────────────
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USER=you@gmail.com
 SMTP_PASSWORD=app-password
-APPROVAL_BASE_URL=http://localhost:8000
+BASE_URL=http://localhost:8000
 
-# ── Observability (optional) ──────────────────────────
+# ── 6. Observability (optional) ───────────────────────────────────────────────
 LANGFUSE_PUBLIC_KEY=...
 LANGFUSE_SECRET_KEY=...
 LANGFUSE_HOST=https://cloud.langfuse.com
-
-# ── GitHub (optional, for private repos) ─────────────
-GITHUB_TOKEN=ghp_...
 ```
 
 ---
@@ -200,18 +215,24 @@ GITHUB_TOKEN=ghp_...
 4. Bot greets the user with a summary of what it found
 
 ### Phase 2: Intelligent Questioning
-Questions follow a **strict mandatory order**:
+Questions follow a **strict mandatory order** (one per turn, 4–5 lines each):
 
 | Step | All Deployments | Dev Only | Prod Only |
 |---|---|---|---|
 | 1 | Cloud Provider | | |
 | 2 | Environment | | |
-| 3 | Region | ✓ (cheapest) | ✓ (latency/compliance) |
-| 4 | | Basic instance | Traffic estimation |
-| 5–12 | | | HA, storage, IAM, monitoring, backup, security |
+| 3 | Region | ✓ (quickest) | ✓ (latency/compliance) |
+| 4 | | Basic instance | Traffic estimation (DAU) |
+| 5–14 | | | HA, storage, IAM, monitoring, backup, security |
+
+**DigitalOcean-specific fields collected:**
+- `do_region` (e.g. nyc3, ams3, sgp1)
+- `droplet_size` (derived from DAU)
+- `ssh_key_name` (looked up via data source)
+- Managed Database, Redis, Spaces (object storage), Firewall
 
 ### Phase 3: Code Generation
-`LLMGenerator` creates:
+`LLMGenerator` creates (with provider-specific prompts):
 - **`main.tf`** — VPC, instances, security groups, IAM, load balancers
 - **`variables.tf`** — All configurable parameters with descriptions and defaults
 - **`outputs.tf`** — IPs, URLs, connection strings
@@ -286,36 +307,35 @@ TerraformCloudAgent/
 ├── app/
 │   ├── core/
 │   │   ├── auth.py                # Firebase token verification (Admin SDK)
-│   │   ├── config.py              # Environment configuration
+│   │   ├── config.py              # Environment configuration (v2.2.0)
 │   │   ├── database.py            # MongoDB singleton connection
 │   │   └── logger.py              # Structured logging setup
 │   │
 │   ├── models/
-│   │   ├── schemas.py             # Pydantic models (RunResponse, AgentRequest, etc.)
+│   │   ├── schemas.py             # Pydantic models (CloudProvider: aws|gcp|digitalocean)
 │   │   └── conversation_schemas.py
 │   │
 │   ├── services/
-│   │   ├── conversation_manager.py  # Chat orchestration & state machine
+│   │   ├── conversation_manager.py  # Chat orchestration & state machine (3 providers)
 │   │   ├── llm_service.py           # Gemini API integration
-│   │   ├── llm_generator.py         # Terraform code generation (4 providers)
+│   │   ├── llm_generator.py         # Terraform code generation (AWS + GCP + DO)
 │   │   ├── github_service.py        # GitHub API client (public + private repos)
 │   │   ├── workflow_engine.py       # Terraform lifecycle (plan/apply/destroy)
 │   │   ├── run_manager.py           # Run state & workspace management
 │   │   ├── user_service.py          # MongoDB user upsert (auth sync)
-│   │   ├── email_service.py         # SMTP approval emails
-│   │   └── service_templates.py     # Provider-specific Terraform snippets
+│   │   └── email_service.py         # SMTP approval emails
 │   │
 │   └── main.py                      # FastAPI application & all routes
 │
 ├── frontend/
 │   ├── src/
 │   │   ├── pages/
-│   │   │   ├── WelcomePage.jsx      # New chat form (owner, repo, token, branch)
+│   │   │   ├── WelcomePage.jsx      # New chat form (repo, token, branch)
 │   │   │   └── WorkspacePage.jsx    # Chat + File Review (edit) + Lifecycle tabs
 │   │   ├── components/
 │   │   │   ├── common/              # Button, Card, Input, Badge
 │   │   │   ├── features/chat/       # ChatPanel, ChatMessage, CodeEditor, CodeViewer
-│   │   │   └── layout/              # Sidebar
+│   │   │   └── layout/              # Sidebar (TerraBot branding)
 │   │   ├── services/
 │   │   │   ├── api.js               # Re-exports from client.js
 │   │   │   ├── client.js            # Axios instance + all API methods
@@ -324,7 +344,7 @@ TerraformCloudAgent/
 │   │   ├── hooks/                   # useAuth, useSession
 │   │   ├── App.jsx                  # Root component & routing
 │   │   └── Login.jsx                # Email/password + Google sign-in
-│   └── package.json
+│   └── package.json                 # v2.2.0
 │
 ├── runs/                            # Isolated Terraform workspaces per run
 │   └── run_YYYYMMDD_HHMMSS/
@@ -353,7 +373,7 @@ docker run -d -p 27017:27017 mongo:latest
 ```
 
 **Firebase auth errors**
-- Ensure `FIREBASE_PROJECT_ID` and `FIREBASE_CREDENTIALS_PATH` are set correctly
+- Ensure `FIREBASE_PROJECT_ID` and `FIREBASE_SERVICE_ACCOUNT_PATH` are set correctly
 - The service account JSON file must be accessible at the configured path
 - For Google OAuth, ensure the Firebase project has Google as a sign-in provider
 
@@ -368,6 +388,11 @@ terraform --version
 
 # Windows: ensure terraform.exe is in PATH
 ```
+
+**DigitalOcean deployment fails**
+- Ensure `DO_TOKEN` is set in `.env` — this is passed to Terraform as `var.do_token`
+- Ensure the SSH key name you provide exists in your DigitalOcean account (Settings → Security → SSH Keys)
+- The agent looks up your SSH key by **name** using a `data "digitalocean_ssh_key"` source
 
 **Terraform validate fails after edit**
 - The backend automatically re-runs `terraform fmt` + `terraform validate` after file saves
@@ -386,3 +411,5 @@ terraform --version
 ---
 
 **Built with [FastAPI](https://fastapi.tiangolo.com/) · [React](https://react.dev/) · [Google Gemini](https://ai.google.dev/) · [Terraform](https://www.terraform.io/) · [Firebase](https://firebase.google.com/) · [MongoDB](https://www.mongodb.com/)**
+
+> **TerraBot v2.2.0** — AWS · GCP · DigitalOcean

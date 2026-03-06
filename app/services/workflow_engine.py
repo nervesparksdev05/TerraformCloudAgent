@@ -233,7 +233,6 @@ class WorkflowEngine:
         self.run_manager = RunManager()
         self.llm_generator = LLMGenerator()
         self.workspace_manager = WorkspaceManager()
-        self.security_checker = None  # Legacy placeholder
 
     # ================================================================
     # PLANNING PHASE

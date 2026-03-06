@@ -19,9 +19,9 @@ export const Sidebar = ({
     <aside className="sidebar">
       <Card gradient className="mb-6">
         <h2 className="flex items-center gap-2 text-white">
-          <Terminal size={24} /> TCA
+          <Terminal size={24} /> TerraBot
         </h2>
-        <p className="text-xs text-white/80 mt-1">README-driven Cloud Agent</p>
+        <p className="text-xs text-white/80 mt-1">Multi-Cloud AI Infrastructure Agent</p>
       </Card>
 
       <Button variant="primary" className="w-full mb-6" onClick={onNewChat} icon={Plus}>

@@ -28,9 +28,9 @@ export const WelcomePage = ({ onStartConversation, loading }) => {
           >
             <Terminal size={48} className="text-white" />
           </div>
-          <h1 className="text-3xl mb-2 font-bold">Welcome to Terraform Agent</h1>
+          <h1 className="text-3xl mb-2 font-bold">Welcome to TerraBot</h1>
           <p className="text-gray-400">
-            Deploy complex architectures directly from your GitHub READMEs.
+            Intelligent Multi-Cloud Infrastructure Agent (AWS, GCP, DigitalOcean)
           </p>
         </div>
 

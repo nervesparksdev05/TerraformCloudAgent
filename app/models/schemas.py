@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from enum import Enum
 
-CloudProvider = Literal["aws", "gcp", "azure", "digitalocean"]
+CloudProvider = Literal["aws", "gcp", "digitalocean"]
 
 
 class RunStatus(str, Enum):
@@ -32,7 +32,7 @@ class AgentRequest(BaseModel):
 
     provider: CloudProvider = Field(
         default="aws",
-        description="Cloud provider (aws, gcp, azure, or digitalocean)"
+        description="Cloud provider (aws, gcp, or digitalocean)"
     )
 
     auto_approve: bool = Field(
@@ -73,7 +73,7 @@ class RunResponse(BaseModel):
     status: RunStatus = Field(..., description="Current status of the run")
     provider: CloudProvider = Field(
         ...,
-        description="Cloud provider used: 'aws', 'gcp', 'azure', or 'digitalocean'",
+        description="Cloud provider used: 'aws', 'gcp', or 'digitalocean'",
     )
     log_path: str = Field(..., description="Path to run logs and workspace")
 
