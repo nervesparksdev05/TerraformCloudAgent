@@ -33,15 +33,20 @@ export const ChatMessage = ({ message, onSuggestionClick, sessionId }) => {
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             components={{
-              // Code blocks
-              code({ node, inline, className, children, ...props }) {
-                const match = /language-(\w+)/.exec(className || '');
-                return !inline ? (
-                  <pre className="bg-black/30 rounded-lg p-3 overflow-x-auto my-2">
-                    <code className={className} {...props}>
-                      {children}
-                    </code>
+              // Preformatted blocks
+              pre({ children, ...props }) {
+                return (
+                  <pre className="bg-black/30 rounded-lg p-3 overflow-x-auto my-2" {...props}>
+                    {children}
                   </pre>
+                );
+              },
+              // Code items
+              code({ node, inline, className, children, ...props }) {
+                return !inline ? (
+                  <code className={`${className || ''} block font-mono text-sm`} {...props}>
+                    {children}
+                  </code>
                 ) : (
                   <code className="bg-white/10 px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
                     {children}
@@ -120,7 +125,7 @@ export const ChatMessage = ({ message, onSuggestionClick, sessionId }) => {
             {message.content}
           </ReactMarkdown>
         )}
-        
+
         {/* Streaming indicator */}
         {message.isStreaming && (
           <span className="inline-block w-2 h-4 bg-purple-500 ml-1 animate-pulse"></span>

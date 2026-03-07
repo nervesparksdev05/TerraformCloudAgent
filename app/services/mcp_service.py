@@ -479,7 +479,13 @@ class MCPManager:
 
     # ── Terraform registry validation (post-generation) ───────────────────────
 
-    async def validate_terraform(self, main_tf: str) -> ValidationResult:
+    async def validate_terraform(
+        self,
+        main_tf: str,
+        session_id: str = None,
+        user_id: str = None,
+        username: str = None,
+    ) -> ValidationResult:
         """
         Post-generation validation using the Terraform Registry MCP server.
 

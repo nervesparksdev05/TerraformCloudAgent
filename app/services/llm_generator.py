@@ -1035,12 +1035,23 @@ Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."
         logger.debug("_sanitize_bundle: all 12 fixes applied successfully.")
         return bundle
 
-    async def validate_with_mcp(self, bundle: TerraformBundle) -> ValidationResult:
+    async def validate_with_mcp(
+        self,
+        bundle: TerraformBundle,
+        session_id: str = None,
+        user_id: str = None,
+        username: str = None,
+    ) -> ValidationResult:
         """
         Post-generation validation using the Terraform Registry MCP server.
         Delegates to mcp_service.mcp_manager.validate_terraform().
         """
-        return await mcp_manager.validate_terraform(bundle.main_tf)
+        return await mcp_manager.validate_terraform(
+            bundle.main_tf,
+            session_id=session_id,
+            user_id=user_id,
+            username=username,
+        )
 
     async def _validate_with_mcp_legacy(self, bundle: TerraformBundle) -> ValidationResult:
         """
