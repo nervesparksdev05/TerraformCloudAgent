@@ -1,19 +1,20 @@
-import logging
-logging.basicConfig(level=logging.DEBUG)
 import asyncio
-from mcp.client.sse import sse_client
-from mcp import ClientSession
+from dotenv import load_dotenv
+load_dotenv()
+from app.services.mcp_service import mcp_manager
+from app.core import config
 
-async def main():
+async def test_mcp():
+    print(f"ENABLE_TERRAFORM_MCP: {config.ENABLE_TERRAFORM_MCP}")
+    print(f"TERRAFORM_MCP_SERVER: {config.TERRAFORM_MCP_SERVER}")
+    print("Testing MCP connection...")
     try:
-        async with sse_client("http://localhost:8080/sse") as (read, write):
-            async with ClientSession(read, write) as session:
-                print("Connected! Initializing...")
-                print("heko")   
-                await asyncio.wait_for(session.initialize(), timeout=5)
-                tools = await session.list_tools()
-                print("Tools:", len(tools.tools))
+        tools = await mcp_manager.list_tools("terraform", config.TERRAFORM_MCP_SERVER)
+        print(f"SUCCESS: Found {len(tools)} tools connected via MCP")
+        for t in tools:
+            print(f" - {t['name']}")
     except Exception as e:
-        print("Error:", e)
+        print(f"ERROR: MCP connection failed - {e}")
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(test_mcp())

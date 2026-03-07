@@ -1,11 +1,10 @@
-# docker-compose.yml
 services:
   redis:
     image: redis:7-alpine
     command: redis-server --port 6666
     restart: always
     healthcheck:
-      test: [ "CMD", "redis-cli", "-p", "6666", "ping" ]
+      test: ["CMD", "redis-cli", "-p", "6666", "ping"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -34,7 +33,6 @@ services:
       - "8000:8000"
     environment:
       - REDIS_URL=redis://redis:6666
-      # GCP credentials path inside the container (matches volume mount below)
       - GCP_CREDENTIALS_PATH=/app/gcp-sa-key.json
       - DEPLOYMENT_MODE=production
     depends_on:
@@ -45,7 +43,6 @@ services:
     restart: always
     volumes:
       - ./runs:/app/runs
-      # Mount your GCP service account key (place it at TerraformCloudAgent/gcp-sa-key.json)
       - ./gcp-sa-key.json:/app/gcp-sa-key.json:ro
     networks:
       - terranet

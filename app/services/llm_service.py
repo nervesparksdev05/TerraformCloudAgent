@@ -316,7 +316,9 @@ def _call_gemini_sync(
             logger.error("Gemini unexpected error: %s", exc, exc_info=True)
             raise
 
+    logger.error("Gemini failed after %d retries: %s", _MAX_RETRIES, last_exc)
     raise last_exc
+
 
 # ── Public service classes ────────────────────────────────────────────────────
 
@@ -366,6 +368,10 @@ class LLMService:
 class AsyncLLMService(LLMService):
     """
     Asynchronous Gemini LLM service.
+
+    Adds:
+      - async chat_completion (thread-pool wrapper — avoids blocking the event loop)
+      - async stream_chat_completion (true Gemini streaming)
     """
 
     async def chat_completion(  # type: ignore[override]
@@ -497,16 +503,26 @@ class AsyncLLMService(LLMService):
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         max_tokens: int = 8000,
+        response_format: Optional[Dict[str, str]] = None,  # ignored for streaming
         timeout: int = 60,
     ) -> AsyncIterator[str]:
+        """
+        Stream text chunks from Gemini.
+        Note: JSON mode (response_mime_type) is not supported for streaming requests.
+        Use chat_completion if you need a JSON response.
+        """
 
         system_instruction, history, last_user = _build_gemini_history(
             messages, json_requested=False
         )
 
         model = _build_model(self._model_name, system_instruction)
+
         gen_cfg = _build_generation_config(
-            temperature, max_tokens, False, self._model_name
+            temperature,
+            max_tokens,
+            json_requested=False,
+            model_name=self._model_name,
         )
 
         def _run_stream():
@@ -518,9 +534,19 @@ class AsyncLLMService(LLMService):
                 stream=True,
             )
 
-        stream = await asyncio.to_thread(_run_stream)
+        try:
+            stream = await asyncio.to_thread(_run_stream)
+        except Exception as exc:
+            logger.error("Gemini stream setup failed: %s", exc, exc_info=True)
+            raise
 
         for chunk in stream:
-            if getattr(chunk, "text", None):
-                yield chunk.text
-         
+            try:
+                if chunk.text:
+                    yield chunk.text
+            except (ValueError, AttributeError):
+                candidate = (chunk.candidates[0] if getattr(chunk, "candidates", None) else None)
+                if candidate and getattr(candidate, "finish_reason", None) in _ACCEPTABLE_FINISH_REASONS:
+                    continue
+                logger.debug("Skipping chunk with no text.")
+

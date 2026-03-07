@@ -1,4 +1,4 @@
-"""llm_generator.py — TerraBot: AWS Free Tier Terraform generator powered by Gemini."""
+"""llm_generator.py — TerraBot: Multi-cloud Terraform generator (AWS / GCP / DigitalOcean) powered by Gemini."""
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 from app.services import langfuse_service
 from app.services.llm_service import LLMService, AsyncLLMService
 from app.services.mcp_service import mcp_manager, ValidationResult
+
 from app.core import config
 from app.core.logger import get_logger
 from app.models.schemas import TerraformBundle
@@ -18,10 +19,8 @@ from app.models.schemas import TerraformBundle
 logger = get_logger(__name__)
 
 
-
-
 class LLMGenerator:
-    """Generate production-grade AWS Free Tier Terraform files from conversation parameters."""
+    """Generate production-grade Terraform files for AWS, GCP, and DigitalOcean from conversation parameters."""
 
     _SYSTEM = """\
 You are a senior AWS Terraform engineer specialising in the AWS Free Tier. Generate complete, production-ready Terraform for AWS.
@@ -79,6 +78,162 @@ RULES:
 - Return ONLY valid JSON: {"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."}
 """
 
+    _DO_SYSTEM = """\
+You are a senior DigitalOcean Terraform engineer. Generate complete, production-ready Terraform for DigitalOcean.
+
+== REQUIRED PROVIDER BLOCK ==
+1. EVERY generated main.tf MUST start with:
+   terraform {
+     required_providers {
+       digitalocean = { source = "digitalocean/digitalocean", version = "~> 2.0" }
+     }
+   }
+   provider "digitalocean" { token = var.do_token }
+
+== REQUIRED VARIABLES ==
+2. Always declare these in variables.tf:
+   - do_token      (sensitive = true, no default)
+   - do_region     (default = "nyc3")
+   - project_name
+   - environment
+   - ssh_key_name  (the DO SSH key name, not fingerprint)
+   - alert_email
+
+== SSH KEY LOOKUP ==
+3. ALWAYS look up the SSH key by name using a data source:
+   data "digitalocean_ssh_key" "main" { name = var.ssh_key_name }
+   Reference: data.digitalocean_ssh_key.main.id
+   NEVER hardcode a fingerprint or ID.
+
+== DROPLET ==
+4. Use resource "digitalocean_droplet" with:
+   - image = "ubuntu-22-04-x64"
+   - region = var.do_region
+   - size = var.droplet_size
+   - ssh_keys = [data.digitalocean_ssh_key.main.id]
+   - Name pattern: {project_name}-{environment}-app-{count.index}
+
+== VPC ==
+5. Always create a digitalocean_vpc:
+   - name: {project_name}-{environment}-vpc
+   - region: var.do_region
+   - ip_range: "10.10.0.0/16"
+
+== FIREWALL ==
+6. Always create a digitalocean_firewall with:
+   - Allow inbound: 80/TCP, 443/TCP from 0.0.0.0/0
+   - Allow inbound: 22/TCP from var.ssh_allowed_cidrs (default = ["0.0.0.0/0"] for DO, user restricts)
+   - Allow all outbound
+
+== LOAD BALANCER ==
+7. When use_alb = true, create a digitalocean_loadbalancer:
+   - forwarding_rule: entry_port=80 → target_port=80
+   - healthcheck: port=var.health_check_port, path=var.health_check_path
+   - region = var.do_region
+   - Attach all Droplets via droplet_ids
+
+== MANAGED DATABASE ==
+8. For SQL: use resource "digitalocean_database_cluster" with engine and version.
+   For Redis: use engine = "redis".
+   Always use private_network_uuid = digitalocean_vpc.main.id
+
+== SPACES ==
+9. If storage_needs = true:
+   - resource "digitalocean_spaces_bucket" with region = var.do_region
+   - Optionally add digitalocean_spaces_bucket_cors_configuration
+
+== DOMAIN / DNS ==
+10. If custom_domain is set:
+    - resource "digitalocean_domain" for the root domain
+    - resource "digitalocean_record" A records pointing to Droplet IP or LB IP
+
+== MONITORING ALERTS ==
+11. If alert_email is set:
+    - resource "digitalocean_monitor_alert" for CPU utilization > 80%
+    - alerts block: email = [var.alert_email]
+
+== PROJECT GROUPING ==
+12. Always create a digitalocean_project to group all resources logically.
+
+== STARTUP SCRIPT ==
+13. User data for Droplet (same pattern as AWS):
+    - #!/bin/bash, set -e
+    - Install deps, clone repo, write .env, start app with systemd
+    - Use ${var.VARIABLE_NAME} for Terraform variables in user_data (templatefile-style)
+    - Use $${BASH_VAR} for Bash shell variables
+
+== NAMING ==
+14. Pattern: {project_name}-{environment}-{resource_type}
+
+== SECRET HANDLING ==
+15. Secret env vars default to "" in variables.tf and are written to .env as placeholders.
+
+== OUTPUTS ==
+16. Output: Droplet IPs, LB IP, database connection string, Spaces endpoint. The 'sensitive' argument on an output MUST be a static boolean (true or false). NEVER use a variable expression like sensitive = (var.x == "foo").
+
+RETURN ONLY valid JSON: {"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."}
+"""
+
+    _GCP_SYSTEM = """\
+You are a senior Google Cloud (GCP) Terraform engineer. Generate complete, production-ready Terraform for GCP.
+
+== REQUIRED PROVIDER BLOCK ==
+1. EVERY generated main.tf MUST start with:
+   terraform {
+     required_providers {
+       google = { source = "hashicorp/google", version = "~> 5.0" }
+     }
+   }
+   provider "google" {
+     project = var.gcp_project_id
+     region  = var.gcp_region
+   }
+
+== REQUIRED VARIABLES ==
+2. Always declare these in variables.tf:
+   - gcp_project_id (default = "")
+   - gcp_region     (default = "us-central1")
+   - project_name
+   - environment
+   - machine_type
+   - ssh_username   (default = "ubuntu")
+   - ssh_key_name   (optional, default = "")
+
+== COMPUTE ENGINE ==
+3. Use resource "google_compute_instance":
+   - machine_type = var.machine_type
+   - boot_disk { initialize_params { image = "ubuntu-os-cloud/ubuntu-2204-lts" } }
+   - network_interface { network = "default"  access_config {} }
+   - tags = ["http-server", "https-server", "allow-ssh"]
+   - Name pattern: {project_name}-{environment}-app-{count.index}
+   - metadata: Set "ssh-keys" if var.ssh_key_name is provided.
+
+== FIREWALL ==
+4. Create a google_compute_firewall if needed, or rely on default network allowing port 80/443/22.
+
+== MANAGED DATABASE ==
+5. For SQL: use "google_sql_database_instance".
+
+== CLOUD STORAGE ==
+6. If storage_needs = true:
+   - resource "google_storage_bucket" with location = var.gcp_region
+
+== STARTUP SCRIPT ==
+7. Provide metadata_startup_script on the compute instance:
+   - #!/bin/bash, set -e
+   - Bash shell variables (APP_DIR, ENV_FILE) MUST be written as `$${VAR_NAME}` so Terraform renders them as `${VAR_NAME}` for the shell
+   - Install deps, clone repo, write .env with Terraform variables, start app with systemd
+   - Use Terraform interpolation for setup (e.g., `${var.my_var}`)
+
+== SECRET HANDLING ==
+8. Secret env vars default to "" in variables.tf and are written to .env as placeholders.
+
+== OUTPUTS ==
+9. Output: Compute Engine IPs, DB connection, Storage URL. The 'sensitive' argument on an output MUST be a static boolean (true or false). NEVER use a variable expression like sensitive = (var.x == "foo").
+
+RETURN ONLY valid JSON: {"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."}
+"""
+
     def __init__(self) -> None:
         self.llm_service = AsyncLLMService()
 
@@ -101,51 +256,96 @@ RULES:
             if k in params and not isinstance(params[k], list):
                 params[k] = []
 
-        user_prompt = self._build_prompt(params)
-        session_id = params.get("session_id", "unknown_mcp_session")
+        # Select system prompt based on provider
+        provider = str(params.get("cloud_provider", "aws")).lower()
+        
+        if provider == "digitalocean":
+            user_prompt = self._build_do_prompt(params)
+            system_prompt = self._DO_SYSTEM
+        elif provider == "gcp":
+            user_prompt = self._build_gcp_prompt(params)
+            system_prompt = self._GCP_SYSTEM
+        else:
+            user_prompt = self._build_prompt(params)
+            system_prompt = self._SYSTEM
 
-        # Top-level trace for the entire TF generation pipeline
+        session_id = params.get("session_id", "unknown_mcp_session")
+        user_id = params.get("user_id")
+        username = params.get("username")
+
+# Top-level trace for the entire TF generation pipeline
         pipeline_trace = langfuse_service.create_trace(
             name="Terraform Pipeline",
             session_id=session_id,
-             user_id=params.get("user_id"),
-             username=params.get("username"),
-             input={"params": {k: v for k, v in params.items() if k != "readme_context"},
-                 "prompt_length": len(user_prompt)},
+            user_id=user_id,
+            username=username,
+            input={
+                "params": {k: v for k, v in params.items() if k != "readme_context"},
+                "prompt_length": len(user_prompt),
+            },
         )
 
-        user_id  = params.get("user_id")
-        username = params.get("username")
-
-        # 1. Gather MCP context (async version)
-        mcp_context = await mcp_manager.gather_registry_context(user_prompt, session_id)
+        # ── Pre-generation: gather live Terraform Registry context via MCP ──
+        mcp_context = ""
+        if config.ENABLE_TERRAFORM_MCP:
+            try:
+                mcp_context = await mcp_manager.gather_registry_context(
+                    user_prompt, session_id=session_id
+                )
+                if mcp_context:
+                    logger.info(
+                        "[%s] MCP registry context gathered (%d chars)",
+                        session_id,
+                        len(mcp_context),
+                    )
+            except Exception as e:
+                logger.warning(
+                    "[%s] MCP pre-generation context gathering failed: %s — continuing without.",
+                    session_id,
+                    e,
+                )
 
         if mcp_context:
-            user_prompt += (
-                f"\n\n--- MCP REGISTRY CONTEXT ---\n"
-                f"{mcp_context}\n"
-                f"----------------------------"
+            user_prompt = (
+                "LIVE TERRAFORM REGISTRY CONTEXT (from registry.terraform.io):\n"
+                f"{mcp_context}\n\n"
+                "Use the above registry data to ensure correct provider version constraints\n"
+                "and accurate resource argument names in the generated code.\n\n"
+                + user_prompt
             )
 
-        # 2. Call LLM (async)
-        bundle = await self._call(user_prompt, session_id=session_id, user_id=user_id, username=username)
+        # 2. Call LLM
+        bundle = await self._call(
+            user_prompt,
+            system=system_prompt,
+            session_id=session_id,
+            user_id=user_id,
+            username=username,
+        )
 
         # 3. Generate GitHub workflow
         bundle.github_workflow_yaml = self._generate_workflow(session_id=session_id)
 
-        # 4. Post-process async (pass identity so MCP validation traces share the session)
-        result = await self._post_process_async(bundle, session_id=session_id, user_id=user_id, username=username)
+        # 4. Post-process async
+        result = await self._post_process_async(
+            bundle,
+            session_id=session_id,
+            user_id=user_id,
+            username=username,
+        )
 
         # Record final TF files on the pipeline trace
         if pipeline_trace:
             try:
-                pipeline_trace.update(output={
-                    "main_tf": result.main_tf[:5000],
-                    "variables_tf": result.variables_tf[:3000],
-                    "outputs_tf": result.outputs_tf[:2000],
-                    "has_workflow": bool(result.github_workflow_yaml),
-                    "validation_notes": getattr(result, 'validation_notes', None),
-                })
+                pipeline_trace.update(
+                    output={
+                        "main_tf": result.main_tf[:5000],
+                        "variables_tf": result.variables_tf[:3000],
+                        "outputs_tf": result.outputs_tf[:2000],
+                        "has_workflow": bool(result.github_workflow_yaml),
+                        "validation_notes": getattr(result, "validation_notes", None),
+                    }
+                )
             except Exception:
                 pass
 
@@ -454,9 +654,9 @@ jobs:
         run: terraform apply -auto-approve tfplan
 """
 
-    async def _call(self, user_prompt: str, session_id: str = None, user_id: str = None, username: str = None) -> TerraformBundle:
+    async def _call(self, user_prompt: str, system: str = None, session_id: str = None, user_id: str = None, username: str = None) -> TerraformBundle:
         messages = [
-            {"role": "system", "content": self._SYSTEM},
+            {"role": "system", "content": system or self._SYSTEM},
             {"role": "user",   "content": user_prompt},
         ]
 
@@ -487,6 +687,166 @@ jobs:
             data[key] = json.dumps(val, indent=2) if isinstance(val, dict) else str(val or "")
         bundle = TerraformBundle(**data)
         return self._sanitize_bundle(bundle)
+
+    # ── DO Prompt builder ──────────────────────────────────────────────────────
+
+    def _build_do_prompt(self, p: Dict[str, Any]) -> str:
+        """Build the DigitalOcean-specific Terraform generation prompt."""
+        is_prod       = str(p.get("environment", "dev")).lower() in ("prod", "production")
+        github_owner  = p.get("github_owner", "")
+        github_repo   = p.get("github_repo", "")
+        project_name  = p.get("project_name") or github_repo or "app"
+        region        = p.get("do_region") or p.get("region") or "nyc3"
+        droplet_size  = p.get("droplet_size") or ("s-1vcpu-2gb" if is_prod else "s-1vcpu-1gb")
+        instance_count = int(p.get("instance_count", 1) or 1)
+
+        has_db     = p.get("has_database", False)
+        db_type    = p.get("database_type", "none")
+        db_hosting = p.get("database_hosting_model", "managed_cloud")
+        has_cache  = p.get("has_cache", False)
+        has_lb     = p.get("use_alb", False) or (is_prod and instance_count > 1)
+        has_bkt    = p.get("storage_needs", False)
+        use_asg    = p.get("use_asg", False)
+
+        env_lines = [
+            f"  - {ev.get('name')} [{ev.get('category','other')}]: {ev.get('description','')} {'(secret)' if ev.get('is_secret') else ''}"
+            for ev in (p.get("required_env_vars") or []) if isinstance(ev, dict)
+        ] + [
+            f"  - {ev.get('name')} [optional]: {ev.get('description','')}"
+            for ev in (p.get("optional_env_vars") or []) if isinstance(ev, dict)
+        ]
+        env_block = "\n".join(env_lines) or "  None specified."
+
+        ports_block = "\n".join(
+            f"  - {e.get('port')}/{e.get('protocol','tcp')} ({e.get('description','')})"
+            for e in (p.get("ports") or []) if isinstance(e, dict)
+        ) or "  - 80/tcp public (HTTP)\n  - 443/tcp public (HTTPS)"
+
+        readme_ctx = (p.get("readme_context") or "")[:5000] or "Not available."
+        alert_email = p.get("alert_email", "")
+        ssh_key    = p.get("ssh_key_name", "")
+        custom_domain = p.get("custom_domain", "")
+        hc_path    = (p.get("autoscaling_config") or {}).get("health_check_path", "/")
+        domain_line = f"  custom_domain : {custom_domain}" if custom_domain else "  custom_domain : (none)"
+
+        return f"""
+PROVIDER: DigitalOcean
+PROJECT: {project_name}  (github.com/{github_owner}/{github_repo})
+ENVIRONMENT: {p.get('environment', 'dev').upper()}
+
+README CONTEXT (source of truth for startup script and env vars):
+{readme_ctx}
+
+STACK:
+  Language/Framework : {p.get('language', 'Not specified')}
+  Database           : {'YES - ' + db_type + ' (' + db_hosting + ')' if has_db else 'None'}
+  Cache              : {'YES - Redis (DO Managed)' if has_cache else 'None'}
+  File Storage       : {'YES - DO Spaces' if has_bkt else 'None'}
+  Background Jobs    : {'YES' if p.get('background_jobs') else 'None'}
+  Process Manager    : {p.get('process_manager', 'auto-detect')}
+
+DIGITALOCEAN INFRASTRUCTURE:
+  do_region        : {region}
+  droplet_size     : {droplet_size}
+  droplet_image    : ubuntu-22-04-x64
+  instance_count   : {instance_count}
+  ssh_key_name     : {ssh_key or 'REQUIRED - must exist in DO account'}
+  alert_email      : {alert_email or '(none)'}
+{domain_line}
+  load_balancer    : {'YES - DO LB, health check: ' + hc_path if has_lb else 'NO'}
+  storage (spaces) : {'YES' if has_bkt else 'NO'}
+  do_spaces_bucket : {p.get('do_spaces_bucket', '') or '(auto-generated)'}
+  use_asg          : {use_asg}
+  enable_multi_az  : {p.get('enable_multi_az', False)}
+
+PORTS TO EXPOSE:
+{ports_block}
+
+ENVIRONMENT VARIABLES:
+{env_block}
+
+KEY CONSTRAINTS:
+- NEVER hardcode the DO token — always var.do_token
+- ALWAYS look up SSH key via data "digitalocean_ssh_key" {{ name = var.ssh_key_name }}
+- Use count = {instance_count} for digitalocean_droplet resources
+- Tag all resources: project = {project_name}, environment = {p.get('environment', 'dev')}
+- Use var.do_region for ALL region arguments (Droplet, DB, Spaces, LB)
+- Install command : {p.get('install_command') or 'auto-detect'}
+- Start command   : {p.get('app_start_command') or 'auto-detect'}
+
+WORKFLOW:
+  1. Clone repo from https://github.com/{github_owner}/{github_repo}
+  2. Install deps: {p.get('install_command') or 'auto-detect'}
+  3. Write env vars to .env using Terraform variable interpolation
+  4. Create systemd service (HARDCODED paths: WorkingDirectory=/home/ubuntu/app)
+  5. systemctl daemon-reload + enable + start
+
+Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."}}
+"""
+
+    # ── GCP Prompt builder ──────────────────────────────────────────────────────
+
+    def _build_gcp_prompt(self, p: Dict[str, Any]) -> str:
+        """Build the Google Cloud Platform-specific Terraform generation prompt."""
+        is_prod       = str(p.get("environment", "dev")).lower() in ("prod", "production")
+        github_owner  = p.get("github_owner", "")
+        github_repo   = p.get("github_repo", "")
+        project_name  = p.get("project_name") or github_repo or "app"
+        region        = p.get("gcp_region") or p.get("region") or "us-central1"
+        machine_type  = p.get("machine_type") or ("e2-small" if is_prod else "e2-micro")
+        instance_count= int(p.get("instance_count", 1) or 1)
+
+        has_db     = p.get("has_database", False)
+        db_type    = p.get("database_type", "none")
+        db_hosting = p.get("database_hosting_model", "managed_cloud")
+        has_cache  = p.get("has_cache", False)
+
+        env_lines = [
+            f"  - {ev.get('name')} [{ev.get('category','other')}]: {ev.get('description','')} {'(secret)' if ev.get('is_secret') else ''}"
+            for ev in (p.get("required_env_vars") or []) if isinstance(ev, dict)
+        ] + [
+            f"  - {ev.get('name')} [optional]: {ev.get('description','')}"
+            for ev in (p.get("optional_env_vars") or []) if isinstance(ev, dict)
+        ]
+        env_block = "\n".join(env_lines) or "  None specified."
+
+        ports_block = "\n".join(
+            f"  - {e.get('port')}/{e.get('protocol','tcp')} ({e.get('description','')})"
+            for e in (p.get("ports") or []) if isinstance(e, dict)
+        ) or "  - 80/tcp public (HTTP)\n  - 443/tcp public (HTTPS)"
+
+        readme_ctx = (p.get("readme_context") or "")[:5000] or "Not available."
+        
+        return f"""
+PROVIDER: Google Cloud Platform (GCP)
+PROJECT: {project_name}  (github.com/{github_owner}/{github_repo})
+ENVIRONMENT: {p.get('environment', 'dev').upper()}
+
+README CONTEXT (source of truth for startup script and env vars):
+{readme_ctx}
+
+GCP INFRASTRUCTURE:
+  gcp_region       : {region}
+  machine_type     : {machine_type}
+  instance_count   : {instance_count}
+  database         : {'YES - ' + db_type + ' (' + db_hosting + ')' if has_db else 'None'}
+  cache            : {'YES - Cloud Memorystore' if has_cache else 'None'}
+
+PORTS TO EXPOSE:
+{ports_block}
+
+ENVIRONMENT VARIABLES:
+{env_block}
+
+WORKFLOW:
+  1. Clone repo from https://github.com/{github_owner}/{github_repo}
+  2. Install deps: {p.get('install_command') or 'auto-detect'}
+  3. Write env vars to .env using Terraform variable interpolation
+  4. Create systemd service (HARDCODED paths: WorkingDirectory=/home/ubuntu/app)
+  5. systemctl daemon-reload + enable + start
+
+Return ONLY JSON: {{"main_tf": "...", "variables_tf": "...", "outputs_tf": "..."}}
+"""
 
     # ── Post-generation sanitizer ─────────────────────────────────────────────
 
@@ -675,23 +1035,125 @@ jobs:
         logger.debug("_sanitize_bundle: all 12 fixes applied successfully.")
         return bundle
 
-    async def validate_with_mcp(
-        self,
-        bundle: TerraformBundle,
-        session_id: str = None,
-        user_id: str = None,
-        username: str = None,
-    ) -> ValidationResult:
+    async def validate_with_mcp(self, bundle: TerraformBundle) -> ValidationResult:
         """
-        Post-generation validation using the Terraform MCP registry.
-        Delegates to mcp_manager.validate_terraform().
+        Post-generation validation using the Terraform Registry MCP server.
+        Delegates to mcp_service.mcp_manager.validate_terraform().
         """
-        return await mcp_manager.validate_terraform(
-            bundle.main_tf,
-            session_id=session_id,
-            user_id=user_id,
-            username=username,
-        )
+        return await mcp_manager.validate_terraform(bundle.main_tf)
+
+    async def _validate_with_mcp_legacy(self, bundle: TerraformBundle) -> ValidationResult:
+        """
+        [LEGACY — kept for reference only. Use validate_with_mcp() above.]
+        Old inline implementation; replaced by delegation to mcp_manager.
+        """
+        if not config.ENABLE_TERRAFORM_MCP:
+            logger.debug("validate_with_mcp: ENABLE_TERRAFORM_MCP=False — skipping.")
+            return ValidationResult(ok=True, notes=["MCP validation skipped (disabled)."])
+
+        notes: List[str] = []
+        ok = True
+        registry_context: Dict[str, Any] = {}
+
+        try:
+            from app.services.mcp_service import mcp_manager
+
+            tools = await mcp_manager.list_tools("terraform", config.TERRAFORM_MCP_SERVER)
+            if not tools:
+                logger.warning("validate_with_mcp: No MCP tools available — skipping registry check.")
+                return ValidationResult(ok=True, notes=["MCP validation skipped (no tools available)."])
+
+            tool_names = {t["name"] for t in tools}
+            logger.info("validate_with_mcp: %d MCP tools available", len(tools))
+
+            # ── Check 1: Latest provider version ──────────────────────────────
+            if "get_latest_provider_version" in tool_names:
+                try:
+                    result = await asyncio.wait_for(
+                        mcp_manager.call_tool_by_name(
+                            "get_latest_provider_version",
+                            {"namespace": "hashicorp", "name": "aws"},
+                        ),
+                        timeout=15.0,
+                    )
+                    version_info = str(result.content) if result else ""
+                    registry_context["aws_provider_version"] = version_info
+                    notes.append(f"Registry: hashicorp/aws provider — {version_info[:120]}")
+                    logger.info("validate_with_mcp: provider version check OK")
+                except asyncio.TimeoutError:
+                    logger.warning("validate_with_mcp: provider version check timed out")
+                    notes.append("Registry: provider version check timed out.")
+                except Exception as e:
+                    logger.warning("validate_with_mcp: provider version check failed: %s", e)
+                    notes.append(f"Registry: provider version check failed ({e}).")
+
+            # ── Check 2: Verify resource types + collect registry docs ─────────
+            if bundle.main_tf:
+                import re
+                resource_types = list(set(re.findall(r'resource\s+"(aws_[\w]+)"', bundle.main_tf)))
+                resource_docs: Dict[str, str] = {}
+
+                for rtype in resource_types[:8]:
+                    if "search_providers" in tool_names:
+                        try:
+                            search_result = await asyncio.wait_for(
+                                mcp_manager.call_tool_by_name(
+                                    "search_providers",
+                                    {
+                                        "provider_name": "aws",
+                                        "provider_namespace": "hashicorp",
+                                        "service_slug": rtype,
+                                        "provider_document_type": "resources",
+                                    },
+                                ),
+                                timeout=15.0,
+                            )
+                            if search_result and search_result.content:
+                                raw_search = str(search_result.content)
+                                doc_id_match = re.search(r'"provider_doc_id"\s*:\s*"?(\d+)"?', raw_search)
+                                if doc_id_match and "get_provider_details" in tool_names:
+                                    doc_id = doc_id_match.group(1)
+                                    try:
+                                        detail_result = await asyncio.wait_for(
+                                            mcp_manager.call_tool_by_name(
+                                                "get_provider_details",
+                                                {"provider_doc_id": doc_id},
+                                            ),
+                                            timeout=15.0,
+                                        )
+                                        if detail_result and detail_result.content:
+                                            resource_docs[rtype] = str(detail_result.content)[:3000]
+                                            notes.append(f"Registry: ✅ {rtype} — docs fetched.")
+                                        else:
+                                            resource_docs[rtype] = raw_search[:1000]
+                                            notes.append(f"Registry: ✅ {rtype} — found in registry.")
+                                    except Exception:
+                                        resource_docs[rtype] = raw_search[:1000]
+                                        notes.append(f"Registry: ✅ {rtype} — found (detail fetch failed).")
+                                else:
+                                    resource_docs[rtype] = raw_search[:1000]
+                                    notes.append(f"Registry: ✅ {rtype} — found in registry.")
+                                logger.info("validate_with_mcp: %s → found", rtype)
+                            else:
+                                notes.append(f"Registry: ⚠️  {rtype} — not found (may need renaming).")
+                                ok = False
+                                logger.warning("validate_with_mcp: %s → NOT FOUND", rtype)
+                        except asyncio.TimeoutError:
+                            logger.warning("validate_with_mcp: search timed out for %s", rtype)
+                            notes.append(f"Registry: {rtype} — check timed out.")
+                        except Exception as e:
+                            logger.warning("validate_with_mcp: search failed for %s: %s", rtype, e)
+                            notes.append(f"Registry: {rtype} — search error ({e}).")
+
+                if resource_docs:
+                    registry_context["resource_docs"] = resource_docs
+
+        except Exception as e:
+            logger.error("validate_with_mcp: unexpected error: %s", e, exc_info=True)
+            notes.append(f"MCP validation error: {e}")
+            ok = True  # Non-blocking
+
+        return ValidationResult(ok=ok, notes=notes, registry_context=registry_context)
 
     def _post_process(self, bundle: TerraformBundle) -> TerraformBundle:
         """Run terraform fmt + validate if CLI is available."""

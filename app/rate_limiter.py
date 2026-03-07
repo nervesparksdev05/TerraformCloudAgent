@@ -22,10 +22,10 @@ async def check_rate_limit(user_id: str, redis_client: redis.Redis):
             results = await pipe.execute()
             count = results[0]
 
-        if count > 15:
+        if count > 100:
             raise HTTPException(
                 status_code=429,
-                detail="Rate limit exceeded. Max 15 requests per minute."
+                detail="Rate limit exceeded. Max 100 requests per minute."
             )
     except HTTPException:
         raise

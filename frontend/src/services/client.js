@@ -37,7 +37,7 @@ export const api = {
     },
 
     getMe: async () => {
-        const { data } = await client.get('/auth/me');
+        const { data } = await client.post('/auth/verify');
         return data;
     },
 

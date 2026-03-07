@@ -2,23 +2,29 @@
 mcp_service.py — Service for managing Model Context Protocol (MCP) server connections.
 
 This is the single source of truth for ALL MCP operations:
-  - Session management (connect, disconnect, caching)
+  - Session management (connect, disconnect, caching) — stdio transport
   - Tool listing and calling
   - Schema sanitization for Gemini compatibility
-  - Terraform registry context gathering (pre-generation)
-  - Terraform registry validation (post-generation)
+  - Terraform Registry context gathering (pre-generation)
+  - Terraform Registry validation (post-generation)
   - Gemini tool format conversion
   - MCP tool-call execution loop
+
+Transport: stdio subprocess (terraform-mcp-server is NOT an SSE server)
+Registry: registry.terraform.io — used to look up Terraform provider docs regardless of cloud.
 """
 import asyncio
 import json
 import re
+import shlex
 import time
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from mcp import ClientSession
 from mcp.client.sse import sse_client
+from mcp.client.stdio import stdio_client, StdioServerParameters
 
 from app.core import config
 from app.core.logger import get_logger
@@ -69,7 +75,11 @@ def sanitize_schema(schema: dict) -> dict:
 
 class MCPManager:
     """
-    Manages connections to MCP servers via stdio transport.
+    Manages connections to the Terraform MCP server via stdio transport.
+
+    The terraform-mcp-server is a Node.js subprocess launched via npx/the installed
+    binary. It connects to registry.terraform.io and exposes tools for looking up
+    provider versions, resource schemas, and module documentation.
 
     Provides both low-level operations (session management, tool calling)
     and high-level operations (registry context gathering, validation,
@@ -78,7 +88,7 @@ class MCPManager:
 
     def __init__(self):
         self._sessions: Dict[str, ClientSession] = {}
-        self._exit_stacks: Dict[str, Any] = {}
+        self._exit_stacks: Dict[str, AsyncExitStack] = {}
         self._tool_to_server: Dict[str, str] = {}
         self._tools_cache: Dict[str, List[Dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
@@ -87,53 +97,51 @@ class MCPManager:
 
     async def get_session(self, server_name: str, command_line: str) -> Optional[ClientSession]:
         """
-        Get or create an MCP session for a given server.
-        Uses AsyncExitStack to ensure all context managers are correctly exited on failure.
+        Get or create an MCP session for the terraform-mcp-server subprocess.
+
+        command_line is the executable name (e.g. "terraform-mcp-server").
+        Uses stdio transport — no network server required.
         """
         async with self._lock:
             if server_name in self._sessions:
                 return self._sessions[server_name]
 
-            from contextlib import AsyncExitStack
             stack = AsyncExitStack()
             try:
-                # Connect to Docker service via SSE
-                url = "http://mcp:8080/sse" if config.DEPLOYMENT_MODE != "development" else "http://localhost:8080/sse"
+                # Support multi-word commands like "docker run -i --rm hashicorp/terraform-mcp-server"
+                parts = shlex.split(command_line)
+                server_params = StdioServerParameters(
+                    command=parts[0],
+                    args=parts[1:],
+                    env=None,
+                )
 
-                # Enter transport context
-                read, write = await stack.enter_async_context(sse_client(url))
-                
-                # Enter session context
+                read, write = await stack.enter_async_context(stdio_client(server_params))
                 session = ClientSession(read, write)
                 await stack.enter_async_context(session)
-                
-                # Initialize the session
                 await session.initialize()
-                
+
                 self._sessions[server_name] = session
                 self._exit_stacks[server_name] = stack
-                
-                logger.info("Initialized MCP session for server: %s", server_name)
+
+                logger.info("Initialized MCP session for server: %s (stdio)", server_name)
                 return session
             except Exception as e:
                 logger.error("Failed to start MCP server %s: %s", server_name, e)
-                # Ensure we cleanup if initialization failed
                 await stack.aclose()
                 return None
 
     async def initialize_all(self, servers: Dict[str, str]):
         """
         Pre-initialize multiple MCP servers.
-        Useful for calling during application lifespan to ensure ownership by the main task.
+        Useful for calling during application lifespan.
         """
         for name, command in servers.items():
             logger.info("Pre-initializing MCP server: %s", name)
             await self.get_session(name, command)
 
     async def close_all(self):
-        """
-        Close all active MCP sessions.
-        """
+        """Close all active MCP sessions."""
         async with self._lock:
             for server_name, stack in self._exit_stacks.items():
                 try:
@@ -152,9 +160,7 @@ class MCPManager:
     # ── Tool listing and calling ──────────────────────────────────────────────
 
     async def list_tools(self, server_name: str, command_line: str) -> List[Dict[str, Any]]:
-        """
-        List tools available on an MCP server and update mapping (with caching).
-        """
+        """List tools available on an MCP server and update mapping (with caching)."""
         if server_name in self._tools_cache:
             return self._tools_cache[server_name]
 
@@ -172,21 +178,20 @@ class MCPManager:
                     "input_schema": tool.inputSchema
                 })
                 self._tool_to_server[tool.name] = server_name
-            
+
             self._tools_cache[server_name] = tools
+            logger.info("Listed %d tools from MCP server '%s'", len(tools), server_name)
             return tools
         except Exception as e:
             logger.error("Failed to list tools for MCP server %s: %s", server_name, e)
             return []
 
     async def call_tool_by_name(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
-        """
-        Call a tool using its name by looking up which server it belongs to.
-        """
+        """Call a tool using its name by looking up which server it belongs to."""
         server_name = self._tool_to_server.get(tool_name)
         if not server_name:
-            raise ValueError(f"Unknown tool: {tool_name}")
-            
+            raise ValueError(f"Unknown tool: {tool_name}. Have you called list_tools first?")
+
         session = self._sessions.get(server_name)
         if not session:
             raise RuntimeError(f"No active session for MCP server: {server_name}")
@@ -204,7 +209,7 @@ class MCPManager:
     async def get_gemini_tools(self, requested_servers: List[str]) -> List[Dict[str, Any]]:
         """
         Fetch tools from requested MCP servers and convert them to Gemini
-        function_declarations format.
+        function_declarations format, with schema sanitization.
 
         Returns a list suitable for passing as `tools=` to Gemini's GenerativeModel.
         Returns an empty list if no tools are available.
@@ -215,10 +220,6 @@ class MCPManager:
         if "terraform" in requested_servers and config.ENABLE_TERRAFORM_MCP:
             fetch_tasks.append(
                 self.list_tools("terraform", config.TERRAFORM_MCP_SERVER)
-            )
-        if "aws" in requested_servers and config.ENABLE_AWS_MCP:
-            fetch_tasks.append(
-                self.list_tools("aws", config.AWS_MCP_SERVER)
             )
 
         if fetch_tasks:
@@ -237,13 +238,13 @@ class MCPManager:
                 {
                     "name": t["name"],
                     "description": t["description"],
-                    "parameters": t["input_schema"],
+                    "parameters": sanitize_schema(t["input_schema"]) if isinstance(t["input_schema"], dict) else t["input_schema"],
                 }
                 for t in all_mcp_tools
             ]
         }]
 
-    async def execute_tool_calls(self, tool_calls: list, timeout: float = 10.0) -> List[Dict[str, Any]]:
+    async def execute_tool_calls(self, tool_calls: list, timeout: float = 30.0) -> List[Dict[str, Any]]:
         """
         Execute a batch of MCP tool calls from a Gemini function_call response.
 
@@ -289,12 +290,17 @@ class MCPManager:
 
     async def gather_registry_context(self, prompt: str, session_id: str = None) -> str:
         """
-        Use the Terraform MCP server + Gemini to gather registry documentation
-        context before generating Terraform code.
+        Use the Terraform Registry MCP server + Gemini to gather live provider
+        documentation before generating Terraform code.
 
-        Opens a dedicated Docker MCP session, gives the LLM access to registry
-        tools, and returns a technical summary of module versions and resource
-        arguments.
+        Opens a dedicated MCP session (stdio subprocess), gives the LLM access to
+        registry tools (get_provider_details, search_modules, get_latest_provider_version,
+        etc.), and returns a focused technical summary of provider versions and resource
+        argument schemas needed for the Terraform code.
+
+        This is provider-agnostic at the MCP level — the LLM decides which provider
+        to look up based on the prompt. For AWS Terraform, it will naturally query
+        hashicorp/aws.
 
         Returns empty string if MCP is disabled or gathering fails.
         """
@@ -348,20 +354,25 @@ class MCPManager:
                                     FunctionDeclaration(
                                         name=t.name,
                                         description=t.description,
-                                        parameters=sanitize_schema(t.inputSchema)
+                                        parameters=sanitize_schema(t.inputSchema) if isinstance(t.inputSchema, dict) else None
                                     )
                                 ]
                             )
                         )
 
                     gather_system = (
-                        "You are an AI context-gathering agent. Read the user's infrastructure request. "
-                        "Determine if you need to look up documentation from the Terraform Registry "
-                        "(like 'get_provider_details' or 'search_modules') to understand complex properties or syntaxes. "
-                        "Use your tools to query the registry. Once you have enough context, reply with a focused "
-                        "technical summary of the module versions and resource arguments needed to write the code. "
-                        "CRITICAL: Explicitly ignore and filter out any deprecated arguments or properties from your summary. "
-                        "Do NOT generate the actual `.tf` code. ONLY summarize the registry data for the coder."
+                        "You are a Terraform Registry context-gathering agent. "
+                        "Read the user's infrastructure request carefully. "
+                        "Use the Terraform Registry tools (such as 'get_provider_details', "
+                        "'search_providers', 'get_latest_provider_version', 'search_modules') "
+                        "to look up current documentation for the providers and resources needed. "
+                        "Focus on the providers and resource types mentioned in the request. "
+                        "Once you have gathered enough context, reply with a concise technical "
+                        "summary covering: (1) the latest provider version constraint to use, "
+                        "(2) correct argument names for the resource types needed, "
+                        "(3) any deprecated arguments to avoid. "
+                        "CRITICAL: Filter out deprecated arguments. "
+                        "Do NOT generate actual .tf code. Only summarize registry data."
                     )
 
                     model = genai.GenerativeModel(
@@ -372,17 +383,17 @@ class MCPManager:
                     chat = model.start_chat()
                     response = chat.send_message(prompt)
 
-                    # Intercept up to 5 tool calls
+                    # Intercept up to 8 tool calls
                     tool_call_log = []
-                    for _ in range(5):
+                    for _ in range(8):
                         if not response.candidates:
                             break
                         part = response.candidates[0].content.parts[0]
                         if not getattr(part, "function_call", None):
-                            break  # Native text response
+                            break  # Native text response — done
 
                         fc = part.function_call
-                        logger.info("MCP Tool called: %s", fc.name)
+                        logger.info("MCP Registry Tool called: %s", fc.name)
 
                         args = {k: v for k, v in fc.args.items()} if hasattr(fc.args, "items") else dict(fc.args)
                         try:
@@ -436,12 +447,14 @@ class MCPManager:
                             })
                         except Exception:
                             pass
-                    print(f"\n📦 MCP FINAL CONTEXT SUMMARY:\n{final_text}\n")
                     return final_text
         except Exception as e:
             logger.error("Failed async MCP gather: %s", e, exc_info=True)
             if trace:
-                trace.update(level="ERROR", statusMessage=str(e))
+                try:
+                    trace.update(level="ERROR", statusMessage=str(e))
+                except Exception:
+                    pass
             return ""
 
     def gather_registry_context_sync(self, prompt: str, session_id: str = None) -> str:
@@ -458,28 +471,21 @@ class MCPManager:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     future = pool.submit(asyncio.run, self.gather_registry_context(prompt, session_id))
                     return future.result(timeout=120)
-            except RuntimeError: 
-                # No running loop — safe to call asyncio.run() directly
+            except RuntimeError:
                 return asyncio.run(self.gather_registry_context(prompt, session_id))
         except Exception as e:
-            logger.error("Failed to gather MCP context (sync): %s", e)
+            logger.error("Failed to gather MCP registry context (sync): %s", e)
             return ""
 
     # ── Terraform registry validation (post-generation) ───────────────────────
 
-    async def validate_terraform(
-        self,
-        main_tf: str,
-        session_id: str = None,
-        user_id: str = None,
-        username: str = None,
-    ) -> ValidationResult:
+    async def validate_terraform(self, main_tf: str) -> ValidationResult:
         """
-        Post-generation validation using the Terraform MCP registry.
+        Post-generation validation using the Terraform Registry MCP server.
 
         Checks:
-          1. Latest AWS provider version
-          2. Whether each resource type exists in the registry
+          1. Latest AWS provider version via get_latest_provider_version
+          2. Whether each aws_* resource type exists in the registry
           3. Collects registry documentation for auto-fix
 
         Returns a ValidationResult with notes and registry_context.
@@ -528,15 +534,15 @@ class MCPManager:
                     version_info = str(result.content) if result else ""
                     registry_context["aws_provider_version"] = version_info
                     notes.append(f"Registry: hashicorp/aws provider — {version_info[:120]}")
-                    logger.info("validate_terraform: provider version check OK")
+                    logger.info("validate_terraform: AWS provider version check OK")
                 except asyncio.TimeoutError:
                     logger.warning("validate_terraform: provider version check timed out")
-                    notes.append("Registry: provider version check timed out.")
+                    notes.append("Registry: AWS provider version check timed out.")
                 except Exception as e:
                     logger.warning("validate_terraform: provider version check failed: %s", e)
-                    notes.append(f"Registry: provider version check failed ({e}).")
+                    notes.append(f"Registry: AWS provider version check failed ({e}).")
 
-            # ── Check 2: Verify resource types + collect registry docs ─────────
+            # ── Check 2: Verify aws_* resource types + collect registry docs ──
             if main_tf:
                 resource_types = list(set(re.findall(r'resource\s+"(aws_[\w]+)"', main_tf)))
                 resource_docs: Dict[str, str] = {}
@@ -571,19 +577,19 @@ class MCPManager:
                                         )
                                         if detail_result and detail_result.content:
                                             resource_docs[rtype] = str(detail_result.content)[:3000]
-                                            notes.append(f"Registry: {rtype} -- docs fetched.")
+                                            notes.append(f"Registry: {rtype} — docs fetched.")
                                         else:
                                             resource_docs[rtype] = raw_search[:1000]
-                                            notes.append(f"Registry: {rtype} -- found in registry.")
+                                            notes.append(f"Registry: {rtype} — found in registry.")
                                     except Exception:
                                         resource_docs[rtype] = raw_search[:1000]
-                                        notes.append(f"Registry: {rtype} -- found (detail fetch failed).")
+                                        notes.append(f"Registry: {rtype} — found (detail fetch failed).")
                                 else:
                                     resource_docs[rtype] = raw_search[:1000]
-                                    notes.append(f"Registry: {rtype} -- found in registry.")
+                                    notes.append(f"Registry: {rtype} — found in registry.")
                                 logger.info("validate_terraform: %s → found", rtype)
                             else:
-                                notes.append(f"Registry: {rtype} -- not found (may need renaming).")
+                                notes.append(f"Registry: {rtype} — not found (may need renaming).")
                                 ok = False
                                 logger.warning("validate_terraform: %s → NOT FOUND", rtype)
                         except asyncio.TimeoutError:

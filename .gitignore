@@ -105,6 +105,10 @@ calculate_tokens.py
 
 # ── Extra Ignored Files ───────────────────────────────────────────
 api_logs.txt
+api_logs8.txt
+test_mcp_connection.py
+run_test.py
+test_gcp.py
 flake8*.txt
 mcp.txt
 git_files.txt
@@ -123,3 +127,6 @@ test_output.txt
 .mypy_cache/
 fix_main.py
 gcp-sa-key.json
+# ── Token Usage / Per-session Data ───────────────────────────────────────────
+per_session_token_usage.json
+token_usage_results.json

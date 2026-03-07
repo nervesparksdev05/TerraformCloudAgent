@@ -61,7 +61,7 @@ if REQUIRE_AUTH and not FIREBASE_PROJECT_ID:
     raise ValueError("FIREBASE_PROJECT_ID is required when REQUIRE_AUTH=true. Please set it in your .env file.")
 
 
-valid_providers = ["aws", "gcp", "azure", "digitalocean"]
+valid_providers = ["aws", "gcp", "digitalocean"]
 if DEFAULT_PROVIDER not in valid_providers:
     raise ValueError(f"Invalid DEFAULT_PROVIDER: {DEFAULT_PROVIDER}. Must be one of {valid_providers}")
 
@@ -73,7 +73,7 @@ AWS_SESSION_TOKEN = os.getenv("AWS_SESSION_TOKEN")  # optional, for assumed role
 AWS_PROFILE = os.getenv("AWS_PROFILE")
 
 
-# === GCP (LEGACY / BACKWARD-COMPATIBILITY ONLY) ===
+# === GCP (Multi-Cloud Support) ===
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "")
 GCP_REGION = os.getenv("GCP_REGION", "us-central1")
 GCP_ZONE = os.getenv("GCP_ZONE", "us-central1-a")
@@ -85,10 +85,10 @@ PORT = int(os.getenv("PORT", "8000"))
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
 # === App Metadata ===
-APP_NAME = "TerraBot — AWS Free Tier Expert"
-APP_VERSION = "2.1.0"
+APP_NAME = "TerraBot — Multi-Cloud Infrastructure Expert"
+APP_VERSION = "2.2.0"
 APP_DESCRIPTION = (
-    "LLM-powered Terraform agent optimized for AWS Free Tier (with legacy support for GCP, Azure, and DigitalOcean)"
+    "LLM-powered Terraform agent for AWS, GCP, and DigitalOcean"
 )
 
 # === Directories ===

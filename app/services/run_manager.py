@@ -98,9 +98,9 @@ class RunManager:
         
         # Standard Terraform files to look for
         file_map = {
-            "main.tf": "main.tf",
-            "variables.tf": "variables.tf",
-            "outputs.tf": "outputs.tf"
+            "main.tf": "main_tf",
+            "variables.tf": "variables_tf",
+            "outputs.tf": "outputs_tf"
         }
         
         for filename, key in file_map.items():

@@ -128,9 +128,10 @@ def _rate_id(user: Optional[Dict], x_user_id: Optional[str]) -> str:
 
 
 def _build_agent_request(terraform_params: dict) -> AgentRequest:
+    provider_choice = str(terraform_params.get("cloud_provider", "aws")).lower()
     return AgentRequest(
         request=terraform_params,
-        provider="aws",
+        provider=provider_choice,
         auto_approve=False,
     )
 
@@ -324,10 +325,14 @@ async def stream_message(
 
         run_id = None
         if response.is_complete:
-            try:
-                run_id = await _launch_planning(session_id)
-            except Exception as e:
-                logger.error("[%s] stream auto-generate failed: %s", session_id, e, exc_info=True)
+            # Guard: only auto-generate if no run already exists for this session
+            existing_params = conversation_manager.get_collected_parameters(session_id)
+            existing_runs = existing_params.get("run_ids", [])
+            if not existing_runs:
+                try:
+                    run_id = await _launch_planning(session_id)
+                except Exception as e:
+                    logger.error("[%s] stream auto-generate failed: %s", session_id, e, exc_info=True)
 
         completion = {
             "done":         True,
@@ -658,7 +663,7 @@ async def send_approval_email(run_id: str, user: Dict = Depends(get_current_user
 
     try:
         files = run_manager.get_run_files(run_id)
-        if not files or "main.tf" not in files:
+        if not files or "main_tf" not in files:
             raise HTTPException(status_code=400, detail="Terraform files not found or incomplete")
 
         user_email = user.get("email")

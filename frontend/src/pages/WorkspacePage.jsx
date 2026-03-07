@@ -167,10 +167,11 @@ export const WorkspacePage = ({
             }
           >
             <div
-              className={`w-2 h-2 rounded-full animate-pulse ${runData.status === 'completed' || runData.status === 'applied'
+              className={`w-2 h-2 rounded-full animate-pulse ${
+                runData.status === 'completed' || runData.status === 'applied'
                   ? 'bg-green-500'
                   : 'bg-yellow-500'
-                }`}
+              }`}
             />
             {runData.status}
           </Badge>
@@ -439,6 +440,8 @@ export const WorkspacePage = ({
             ) : (
               <InsightsPanel
                 topologyDiagram={runData?.topology_diagram}
+                collectedParams={collectedParams}
+                runData={runData}
               />
             )}
           </div>
