@@ -9,10 +9,13 @@ MONGODB_DATABASE=terraform_agent_new
 GEMINI_API_KEY=your-gemini-api-key
 GEMINI_MODEL=gemini-2.5-pro
 # === Langfuse Configuration (Optional) ===
+# LANGFUSE_MODE: "docker" (local Docker) or "cloud" (https://cloud.langfuse.com)
+LANGFUSE_MODE=docker
 LANGFUSE_SECRET_KEY=sk-lf-your-secret-key
 LANGFUSE_PUBLIC_KEY=pk-lf-your-public-key
-# For Langfuse Cloud use: https://cloud.langfuse.com
-# For self-hosted Docker use: http://host.docker.internal:3000
+# Docker mode: http://host.docker.internal:3000  (from inside Docker)
+#              http://localhost:3000              (running backend directly on host)
+# Cloud mode:  leave LANGFUSE_HOST blank — set LANGFUSE_MODE=cloud instead
 LANGFUSE_HOST=http://host.docker.internal:3000
 # === Firebase Authentication ===
 FIREBASE_PROJECT_ID=your-firebase-project-id

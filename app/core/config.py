@@ -20,9 +20,29 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # === Langfuse Configuration ===
+# LANGFUSE_MODE controls where to send traces.
+# Options:
+#   "docker"  — local Langfuse running in Docker (default for development)
+#               Uses LANGFUSE_HOST or LANGFUSE_BASE_URL (e.g. http://localhost:3000)
+#               When calling from inside Docker use http://host.docker.internal:3000
+#   "cloud"   — Langfuse Cloud (https://cloud.langfuse.com)
+#               Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY from your cloud project
+LANGFUSE_MODE = os.getenv("LANGFUSE_MODE", "docker").lower().strip()
+
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY")
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
-LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+
+# Resolve the host based on mode
+if LANGFUSE_MODE == "cloud":
+    LANGFUSE_HOST = "https://cloud.langfuse.com"
+else:
+    # Docker mode: prefer explicit LANGFUSE_HOST, fallback to LANGFUSE_BASE_URL, then localhost
+    LANGFUSE_HOST = (
+        os.getenv("LANGFUSE_HOST")
+        or os.getenv("LANGFUSE_BASE_URL")
+        or "http://localhost:3000"
+    )
+
 ENABLE_TRACING = bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
 
 # === Firebase Authentication ===
@@ -105,12 +125,23 @@ AWS_MCP_SERVER = ""
 ENABLE_AWS_MCP = False
 
 # === Terraform MCP Configuration ===
-# Uses verified 'terraform-mcp-server' package (installed globally in Docker)
+# The terraform-mcp-server binary runs via mcp-proxy which exposes it as an SSE HTTP endpoint.
+# In Docker (production): the 'mcp' service is reachable at http://mcp:8080/sse (Docker network)
+# On the host (development): use http://localhost:8080/sse (port 8080 is published)
 TERRAFORM_MCP_SERVER = os.getenv("TERRAFORM_MCP_SERVER", "terraform-mcp-server")
 ENABLE_TERRAFORM_MCP = os.getenv("ENABLE_TERRAFORM_MCP", "False").lower() == "true"
 
 # === Deployment Configuration ===
-DEPLOYMENT_MODE = os.getenv("DEPLOYMENT_MODE", "development").lower() # development or production
+DEPLOYMENT_MODE = os.getenv("DEPLOYMENT_MODE", "development").lower()  # development or production
+
+# MCP SSE endpoint — configurable so you don't need to change code when switching environments.
+# Override with MCP_SSE_URL in .env if your setup differs.
+_default_mcp_sse = (
+    "http://mcp:8080/sse"       # Docker network service name
+    if DEPLOYMENT_MODE != "development"
+    else "http://localhost:8080/sse"  # host machine, port published by docker-compose
+)
+MCP_SSE_URL = os.getenv("MCP_SSE_URL", _default_mcp_sse)
 
 # === Security ===
 # Security validation is now handled in security_checker.py with provider-specific rules

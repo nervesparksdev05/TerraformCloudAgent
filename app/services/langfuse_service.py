@@ -5,12 +5,37 @@ Provides helper methods for tracing LLM calls and recording user feedback.
 Degrades gracefully (no-op) if Langfuse keys are not configured.
 """
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Dict, List, Optional
 
 from app.core import config
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Context Variables for propagation
+# ---------------------------------------------------------------------------
+user_id_var: ContextVar[Optional[str]] = ContextVar("user_id", default=None)
+username_var: ContextVar[Optional[str]] = ContextVar("username", default=None)
+session_id_var: ContextVar[Optional[str]] = ContextVar("session_id", default=None)
+
+@contextmanager
+def user_context(*, user_id: Optional[str] = None, username: Optional[str] = None, session_id: Optional[str] = None):
+    """
+    Context manager to set user identity for Langfuse tracing.
+    Nested child observations will automatically inherit these attributes.
+    """
+    token_user = user_id_var.set(user_id or user_id_var.get())
+    token_name = username_var.set(username or username_var.get())
+    token_sess = session_id_var.set(session_id or session_id_var.get())
+    try:
+        yield
+    finally:
+        user_id_var.reset(token_user)
+        username_var.reset(token_name)
+        session_id_var.reset(token_sess)
 
 # ---------------------------------------------------------------------------
 # Singleton Langfuse client
@@ -24,7 +49,8 @@ def _init_client():
 
     public_key = getattr(config, "LANGFUSE_PUBLIC_KEY", None)
     secret_key = getattr(config, "LANGFUSE_SECRET_KEY", None)
-    host = getattr(config, "LANGFUSE_HOST", None)
+    host       = getattr(config, "LANGFUSE_HOST", None)
+    mode       = getattr(config, "LANGFUSE_MODE", "docker")
 
     if not public_key or not secret_key:
         logger.info("Langfuse keys not configured — tracing disabled.")
@@ -33,18 +59,33 @@ def _init_client():
 
     try:
         from langfuse import Langfuse
-        kwargs: Dict[str, Any] = {
-            "public_key": public_key,
-            "secret_key": secret_key,
-        }
-        if host:
-            kwargs["host"] = host
 
-        _langfuse_client = Langfuse(**kwargs)
-        _enabled = True
-        logger.info("Langfuse client initialised (host=%s)", host or "cloud")
+        # Always pass host so the client never silently falls back to cloud.langfuse.com
+        # when you actually want a local Docker instance.
+        _langfuse_client = Langfuse(
+            public_key=public_key,
+            secret_key=secret_key,
+            host=host,                 # resolved by config.py based on LANGFUSE_MODE
+        )
+
+        # Verify connectivity immediately so misconfigurations surface at startup
+        try:
+            _langfuse_client.auth_check()
+            _enabled = True
+            logger.info(
+                "Langfuse client initialised — mode=%s host=%s",
+                mode, host,
+            )
+        except Exception as check_exc:
+            logger.warning(
+                "Langfuse auth_check failed (mode=%s host=%s): %s — tracing disabled.",
+                mode, host, check_exc,
+            )
+            _langfuse_client = None
+            _enabled = False
+
     except Exception as exc:
-        logger.warning("Failed to initialise Langfuse: %s", exc)
+        logger.warning("Failed to initialise Langfuse client: %s", exc)
         _enabled = False
 
 
@@ -81,17 +122,22 @@ def create_trace(
         logger.debug("Langfuse disabled — skipping create_trace")
         return None
     try:
+        # Pull from context variables if not provided
+        _user_id = user_id or user_id_var.get()
+        _username = username or username_var.get()
+        _session_id = session_id or session_id_var.get()
+
         # Ensure metadata is a dict and include username when provided so
         # Langfuse stores a readable username in the trace metadata.
         _metadata = dict(metadata or {})
-        if username:
+        if _username:
             # prefer explicit `username` key so it's easy to find in Langfuse
-            _metadata.setdefault("username", username)
+            _metadata.setdefault("username", _username)
 
         kwargs = {
             "name": name,
-            "session_id": session_id,
-            "user_id": user_id,
+            "session_id": _session_id,
+            "user_id": _user_id,
             "metadata": _metadata,
         }
         if input is not None:
@@ -100,7 +146,7 @@ def create_trace(
             kwargs["output"] = output
 
         trace = _langfuse_client.trace(**kwargs)
-        logger.info("Langfuse trace created: name=%s session=%s user=%s input_set=%s", name, session_id, user_id, input is not None)
+        logger.info("Langfuse trace created: name=%s session=%s user=%s input_set=%s", name, _session_id, _user_id, input is not None)
         return trace
     except Exception as exc:
         logger.warning("Langfuse create_trace failed: %s", exc)
@@ -126,8 +172,14 @@ def log_generation(
     try:
         from datetime import datetime, timezone
 
-        # If no trace was provided, create an ad-hoc one
-        parent = trace or _langfuse_client.trace(name="ad-hoc")
+        # If no trace was provided, create an ad-hoc one using context vars
+        parent = trace
+        if not parent:
+            parent = create_trace(name="ad-hoc-generation")
+
+        if not parent:
+            # tracing disabled or failed
+            return None
 
         # Convert epoch float → datetime (Langfuse v2 expects datetime objects)
         dt_start = None

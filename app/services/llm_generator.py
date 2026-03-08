@@ -290,7 +290,10 @@ RETURN ONLY valid JSON: {"main_tf": "...", "variables_tf": "...", "outputs_tf": 
         if config.ENABLE_TERRAFORM_MCP:
             try:
                 mcp_context = await mcp_manager.gather_registry_context(
-                    user_prompt, session_id=session_id
+                    user_prompt, 
+                    session_id=session_id,
+                    user_id=user_id,
+                    username=username
                 )
                 if mcp_context:
                     logger.info(

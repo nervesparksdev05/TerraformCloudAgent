@@ -592,6 +592,7 @@ class ConversationManager:
         greeting = str(analysis.get("message") or "Which cloud provider would you like to deploy on - **AWS**, **GCP**, or **DigitalOcean**?")
         session = ConversationSession(
             session_id=sid, provider="aws",
+            user_id=user_id, username=username,
             messages=[{"role": "assistant", "content": greeting}],
             collected_parameters=extracted,
             is_complete=False, status=ConversationStatus.ACTIVE,
@@ -1030,19 +1031,19 @@ class ConversationManager:
                 if is_gcp:
                     if not cp.get("gcp_region") and not cp.get("region"):
                         pending.append(
-                            "  - 🌍 GCP REGION: us-central1 (USA), us-east1 (S. Carolina), europe-west1 (Belgium), "
+                            "  -  GCP REGION: us-central1 (USA), us-east1 (S. Carolina), europe-west1 (Belgium), "
                             "asia-east1 (Taiwan), asia-south1 (Mumbai). Regional MIG works in all main regions."
                         )
                 elif is_do:
                     if not cp.get("do_region") and not cp.get("region"):
                         pending.append(
-                            "  - 🌍 DO REGION: nyc3 (New York), sfo3 (San Francisco), fra1 (Frankfurt), "
+                            "  -  DO REGION: nyc3 (New York), sfo3 (San Francisco), fra1 (Frankfurt), "
                             "sgp1 (Singapore), ams3 (Amsterdam). DO LB is region-scoped."
                         )
                 else:
                     if not cp.get("aws_region") and not cp.get("region"):
                         pending.append(
-                            "  - 🌍 AWS REGION: us-east-1 (USA), eu-west-1 (Europe), ap-south-1 (India), "
+                            "  -  AWS REGION: us-east-1 (USA), eu-west-1 (Europe), ap-south-1 (India), "
                             "ap-southeast-1 (SE Asia). Multi-AZ works in all main regions."
                         )
 
@@ -1294,6 +1295,9 @@ class ConversationManager:
             alert_email = ""
 
         return {
+            "session_id":              session_id,
+            "user_id":                 getattr(s, "user_id", None),
+            "username":                getattr(s, "username", None),
             "cloud_provider":          provider,
             "environment":             p.get("environment", "dev"),
             "project_name":            p.get("project_name") or p.get("github_repo") or "app",

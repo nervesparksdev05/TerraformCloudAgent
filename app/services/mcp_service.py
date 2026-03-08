@@ -288,7 +288,13 @@ class MCPManager:
 
     # ── Registry context gathering (pre-generation) ───────────────────────────
 
-    async def gather_registry_context(self, prompt: str, session_id: str = None) -> str:
+    async def gather_registry_context(
+        self, 
+        prompt: str, 
+        session_id: str = None,
+        user_id: str = None,
+        username: str = None,
+    ) -> str:
         """
         Use the Terraform Registry MCP server + Gemini to gather live provider
         documentation before generating Terraform code.
@@ -316,19 +322,15 @@ class MCPManager:
 
         from app.services import langfuse_service
 
-        # Try to enrich trace with user info from the conversation session (best-effort)
-        _user_id = None
-        _username = None
-        if session_id:
-            try:
-                from app.services.conversation_manager import ConversationManager
-                _cm = ConversationManager()
-                _sess = _cm.get_session(session_id)
-                if _sess:
-                    _user_id = getattr(_sess, "user_id", None)
-                    _username = getattr(_sess, "username", None)
-            except Exception:
-                pass
+        # Use passed identity or fall back to session-based identity if available
+        _user_id = user_id
+        _username = username
+        
+        if not _user_id and session_id:
+            # Fallback to session-based identity for legacy/anonymous calls
+            # Use the session_id as the user_id for grouping
+            _user_id = session_id
+            _username = f"anon-{session_id[:8]}"
 
         # Create trace for context gathering
         trace = langfuse_service.create_trace(
@@ -340,7 +342,8 @@ class MCPManager:
         )
 
         try:
-            url = "http://mcp:8080/sse" if config.DEPLOYMENT_MODE != "development" else "http://localhost:8080/sse"
+            url = config.MCP_SSE_URL
+            logger.info("gather_registry_context: connecting to MCP SSE at %s", url)
             async with sse_client(url) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
@@ -457,7 +460,13 @@ class MCPManager:
                     pass
             return ""
 
-    def gather_registry_context_sync(self, prompt: str, session_id: str = None) -> str:
+    def gather_registry_context_sync(
+        self, 
+        prompt: str, 
+        session_id: str = None,
+        user_id: str = None,
+        username: str = None,
+    ) -> str:
         """
         Synchronous wrapper for gather_registry_context.
         Handles the case where we may or may not be inside a running event loop.
@@ -466,13 +475,18 @@ class MCPManager:
             return ""
         try:
             try:
-                loop = asyncio.get_running_loop()
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(asyncio.run, self.gather_registry_context(prompt, session_id))
-                    return future.result(timeout=120)
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    return asyncio.run_coroutine_threadsafe(
+                        self.gather_registry_context(prompt, session_id, user_id, username), loop
+                    ).result()
+                else:
+                    return loop.run_until_complete(
+                        self.gather_registry_context(prompt, session_id, user_id, username)
+                    )
             except RuntimeError:
-                return asyncio.run(self.gather_registry_context(prompt, session_id))
+                # No running loop, run a new one
+                return asyncio.run(self.gather_registry_context(prompt, session_id, user_id, username))
         except Exception as e:
             logger.error("Failed to gather MCP registry context (sync): %s", e)
             return ""

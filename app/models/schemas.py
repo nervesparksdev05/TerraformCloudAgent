@@ -40,6 +40,9 @@ class AgentRequest(BaseModel):
         description="Auto-approve terraform apply (use with caution)"
     )
 
+    user_id: Optional[str] = Field(None, description="ID of the user who triggered this request")
+    username: Optional[str] = Field(None, description="Username/Email of the user who triggered this request")
+
     class Config:
         json_schema_extra = {
             "example": {

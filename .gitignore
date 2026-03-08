@@ -106,9 +106,16 @@ calculate_tokens.py
 # ── Extra Ignored Files ───────────────────────────────────────────
 api_logs.txt
 api_logs8.txt
+api_crash.txt
+api_crash_logs.txt
+apilog.txt
+build.log
 test_mcp_connection.py
+test_mcp_context.py
 run_test.py
 test_gcp.py
+test_digitalocean_support.py
+test_terrabot_logic.py
 flake8*.txt
 mcp.txt
 git_files.txt
@@ -124,6 +131,8 @@ mypy_report.txt
 py_errors.txt
 py_mcp_err.txt
 test_output.txt
+test_output2.txt
+test_output3.txt
 .mypy_cache/
 fix_main.py
 gcp-sa-key.json

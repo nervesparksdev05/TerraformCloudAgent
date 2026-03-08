@@ -22,6 +22,7 @@ from app.core.logger import get_logger
 from app.models.schemas import RunStatus, AgentRequest, TerraformBundle
 from app.services.run_manager import RunManager
 from app.services.llm_generator import LLMGenerator
+from app.services.security_checker import SecurityChecker
 from app.services.workspace_manager import WorkspaceManager
 
 logger = get_logger(__name__)
@@ -233,7 +234,7 @@ class WorkflowEngine:
         self.run_manager = RunManager()
         self.llm_generator = LLMGenerator()
         self.workspace_manager = WorkspaceManager()
-        self.security_checker = None  # Legacy placeholder
+        self.security_checker = SecurityChecker()
 
     # ================================================================
     # PLANNING PHASE
@@ -250,111 +251,122 @@ class WorkflowEngine:
         Transitions: CREATED/PLANNING → PLANNING → PLANNED (or FAILED)
         """
         try:
-            logger.info("[%s] Starting planning phase - updating status to PLANNING", run_id)
-            self.run_manager.update_run_status(run_id, RunStatus.PLANNING)
-
+            from app.services import langfuse_service
+            
             if not request:
                 logger.info("[%s] No request provided, loading from disk", run_id)
                 request = self._load_original_request(run_id)
 
-            logger.info(
-                "[%s] Starting planning phase (refinement: %s)",
-                run_id,
-                bool(feedback),
-            )
+            _user_id = getattr(request, "user_id", None)
+            _username = getattr(request, "username", None)
+            _session_id = None
+            if isinstance(request.request, dict):
+                _session_id = request.request.get("session_id")
 
-            workspace_path = self.run_manager.get_workspace_path(run_id)
-            logger.info("[%s] Workspace path: %s", run_id, workspace_path)
+            with langfuse_service.user_context(user_id=_user_id, username=_username, session_id=_session_id):
+                logger.info("[%s] Starting planning phase - updating status to PLANNING", run_id)
+                self.run_manager.update_run_status(run_id, RunStatus.PLANNING)
 
-            if feedback:
-                current_code = self.workspace_manager.read_terraform_files(
-                    workspace_path
+                logger.info(
+                    "[%s] Starting planning phase (refinement: %s)",
+                    run_id,
+                    bool(feedback),
                 )
-                params = request.request if isinstance(request.request, dict) else {}
-                bundle = await self.llm_generator.refine_terraform(
-                    base_request=(
-                        request.request
-                        if isinstance(request.request, str)
-                        else json.dumps(request.request)
-                    ),
-                    current_code=current_code,
-                    feedback=feedback,
-                    readme_context=params.get("readme_context", ""),
-                )
-            else:
-                logger.info("[%s] Calling LLM to generate Terraform", run_id)
-                params = request.request if isinstance(request.request, dict) else {}
-                logger.info("[%s] Params keys: %s", run_id, list(params.keys()) if isinstance(params, dict) else "N/A")
-                bundle = await self.llm_generator.generate_terraform(params=params)
-                logger.info("[%s] LLM generation complete", run_id)
 
-            if not bundle or (not bundle.main_tf and not bundle.variables_tf and not bundle.outputs_tf):
-                error_msg = "Terraform generation failed: LLM returned empty content"
-                logger.error("[%s] %s", run_id, error_msg)
-                self.run_manager.update_run_status(run_id, RunStatus.FAILED, error=error_msg)
-                return
+                workspace_path = self.run_manager.get_workspace_path(run_id)
+                logger.info("[%s] Workspace path: %s", run_id, workspace_path)
 
-            self.workspace_manager.write_terraform_files(workspace_path, bundle)
-            if not feedback:
-                self.workspace_manager.write_request_json(workspace_path, request)
+                if feedback:
+                    current_code = self.workspace_manager.read_terraform_files(
+                        workspace_path
+                    )
+                    params = request.request if isinstance(request.request, dict) else {}
+                    bundle = await self.llm_generator.refine_terraform(
+                        base_request=(
+                            request.request
+                            if isinstance(request.request, str)
+                            else json.dumps(request.request)
+                        ),
+                        current_code=current_code,
+                        feedback=feedback,
+                        readme_context=params.get("readme_context", ""),
+                        session_id=_session_id,
+                        user_id=_user_id,
+                        username=_username,
+                    )
+                else:
+                    logger.info("[%s] Calling LLM to generate Terraform", run_id)
+                    params = request.request if isinstance(request.request, dict) else {}
+                    # Inject identity for downstream Langfuse/MCP attribution
+                    params["user_id"] = _user_id
+                    params["username"] = _username
+                    logger.info("[%s] Params keys: %s", run_id, list(params.keys()) if isinstance(params, dict) else "N/A")
+                    bundle = await self.llm_generator.generate_terraform(params=params)
+                    logger.info("[%s] LLM generation complete", run_id)
 
-            # ── Log full TF files + params to Langfuse ────────────────────
-            try:
-                from app.services import langfuse_service
-                session_id = params.get("session_id") if isinstance(params, dict) else None
-                tf_trace = langfuse_service.create_trace(
-                    name="Generated Terraform Files",
-                    session_id=session_id,
-                    user_id=(params.get("user_id") if isinstance(params, dict) else None),
-                    username=(params.get("username") if isinstance(params, dict) else None),
-                    input={
-                        "run_id": run_id,
-                        "is_refinement": bool(feedback),
-                        "params_keys": list(params.keys()) if isinstance(params, dict) else [],
-                    },
-                    output={
-                        "main_tf": bundle.main_tf,
-                        "variables_tf": bundle.variables_tf,
-                        "outputs_tf": bundle.outputs_tf,
-                        "github_workflow_yaml": bundle.github_workflow_yaml or "",
-                    },
-                )
-            except Exception as e:
-                logger.debug("Langfuse TF file logging failed (non-blocking): %s", e)
+                if not bundle or (not bundle.main_tf and not bundle.variables_tf and not bundle.outputs_tf):
+                    error_msg = "Terraform generation failed: LLM returned empty content"
+                    logger.error("[%s] %s", run_id, error_msg)
+                    self.run_manager.update_run_status(run_id, RunStatus.FAILED, error=error_msg)
+                    return
 
-            # Skip terraform plan to avoid credential requirements (multi-cloud support)
-            # Files are generated and ready for review immediately
-            logger.info("[%s] Terraform files generated, skipping plan validation", run_id)
-            plan_output = "Terraform files generated successfully. Plan skipped (multi-cloud mode)."
+                self.workspace_manager.write_terraform_files(workspace_path, bundle)
+                if not feedback:
+                    self.workspace_manager.write_request_json(workspace_path, request)
 
-            topology_diagram = None
+                # ── Log full TF files + params to Langfuse ────────────────────
+                try:
+                    session_id = params.get("session_id") if isinstance(params, dict) else None
+                    tf_trace = langfuse_service.create_trace(
+                        name="Generated Terraform Files",
+                        session_id=session_id,
+                        user_id=(params.get("user_id") if isinstance(params, dict) else None),
+                        username=(params.get("username") if isinstance(params, dict) else None),
+                        input={
+                            "run_id": run_id,
+                            "is_refinement": bool(feedback),
+                            "params_keys": list(params.keys()) if isinstance(params, dict) else [],
+                        },
+                        output={
+                            "main_tf": bundle.main_tf,
+                            "variables_tf": bundle.variables_tf,
+                            "outputs_tf": bundle.outputs_tf,
+                            "github_workflow_yaml": bundle.github_workflow_yaml or "",
+                        },
+                    )
+                except Exception as e:
+                    logger.debug("Langfuse TF file logging failed (non-blocking): %s", e)
 
-            # Persist all Production Excellence metadata + final status into the run state
-            plan_output = "Terraform files generated successfully. Plan skipped (multi-cloud mode)."
-            # Generate topology diagram immediately from the written Terraform files
-            try:
-                diagram_params = request.request if isinstance(request.request, dict) else {}
-                topology_diagram = _generate_topology_diagram(bundle.main_tf, diagram_params)
-                logger.info("[%s] Topology diagram generated (%d chars)", run_id, len(topology_diagram))
-            except Exception as diag_err:
-                logger.warning("[%s] Topology diagram generation failed: %s", run_id, diag_err)
+                # Skip terraform plan to avoid credential requirements (multi-cloud support)
+                logger.info("[%s] Terraform files generated, skipping plan validation", run_id)
+                plan_output = "Terraform files generated successfully. Plan skipped (multi-cloud mode)."
+
                 topology_diagram = None
 
-            run = self.run_manager.get_run(run_id)
-            if run:
-                run.status = RunStatus.PLANNED
-                run.plan_output = plan_output
-                run.topology_diagram = topology_diagram
-                if hasattr(bundle, "validation_notes") and bundle.validation_notes:
-                    run.metadata = run.metadata or {}
-                    run.metadata["mcp_validation_notes"] = bundle.validation_notes
-                self.run_manager.save_run_state(run_id, run)
-                logger.info(
-                    "[%s] Planning complete: status=PLANNED, topology persisted",
-                    run_id,
-                )
+                # Generate topology diagram immediately from the written Terraform files
+                try:
+                    diagram_params = request.request if isinstance(request.request, dict) else {}
+                    topology_diagram = _generate_topology_diagram(bundle.main_tf, diagram_params)
+                    logger.info("[%s] Topology diagram generated (%d chars)", run_id, len(topology_diagram))
+                except Exception as diag_err:
+                    logger.warning("[%s] Topology diagram generation failed: %s", run_id, diag_err)
+                    topology_diagram = None
 
-                logger.info("[%s] Planning phase complete", run_id)
+                run = self.run_manager.get_run(run_id)
+                if run:
+                    run.status = RunStatus.PLANNED
+                    run.plan_output = plan_output
+                    run.topology_diagram = topology_diagram
+                    if hasattr(bundle, "validation_notes") and bundle.validation_notes:
+                        run.metadata = run.metadata or {}
+                        run.metadata["mcp_validation_notes"] = bundle.validation_notes
+                    self.run_manager.save_run_state(run_id, run)
+                    logger.info(
+                        "[%s] Planning complete: status=PLANNED, topology persisted",
+                        run_id,
+                    )
+
+                    logger.info("[%s] Planning phase complete", run_id)
 
         except Exception as e:
             logger.error("[%s] Planning failed: %s", run_id, e, exc_info=True)
@@ -381,112 +393,114 @@ class WorkflowEngine:
         """
         workspace_path: Optional[Path] = None
         try:
-            self.run_manager.update_run_status(run_id, RunStatus.APPLYING)
-            logger.info("[%s] Starting apply phase — running safety checks", run_id)
-
-            workspace_path = self.run_manager.get_workspace_path(run_id)
-
-            # Determine Provider
+            from app.services import langfuse_service
+            
+            # Load original request to recover identity
             orig_request = self._load_original_request(run_id)
+            _user_id = getattr(orig_request, "user_id", None)
+            _username = getattr(orig_request, "username", None)
             vars_data = orig_request.request if isinstance(orig_request.request, dict) else {}
-            provider = vars_data.get("cloud_provider", orig_request.provider).lower()
+            _session_id = vars_data.get("session_id")
 
-            # ── CHECK 1: Cloud Credentials ────────────────────────────
-            if provider == "aws":
-                if not config.AWS_ACCESS_KEY_ID or not config.AWS_SECRET_ACCESS_KEY:
-                    raise ValueError("AWS credentials not set in .env — cannot deploy.")
-                logger.info("[%s] [OK] AWS Credentials found", run_id)
-                if not config.AWS_REGION:
-                    raise ValueError("AWS_REGION is not set in .env — cannot deploy.")
-                logger.info("[%s] [OK] AWS_REGION = %s", run_id, config.AWS_REGION)
-            elif provider == "digitalocean":
-                if not os.getenv("DIGITALOCEAN_TOKEN"):
-                    raise ValueError("DIGITALOCEAN_TOKEN is not set in environment — cannot deploy to DO.")
-                logger.info("[%s] [OK] DIGITALOCEAN_TOKEN found", run_id)
-            elif provider == "gcp":
-                if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS") and not os.getenv("GCP_CREDENTIALS"):
-                    logger.warning("[%s] GCP credentials not strictly found, assuming external authentication.", run_id)
+            with langfuse_service.user_context(user_id=_user_id, username=_username, session_id=_session_id):
+                self.run_manager.update_run_status(run_id, RunStatus.APPLYING)
+                logger.info("[%s] Starting apply phase — running safety checks", run_id)
 
-            # ── CHECK 2.5: Generate safe terraform.tfvars.json ────────
-            logger.info("[%s] Generating terraform.tfvars.json...", run_id)
-            orig_request = self._load_original_request(run_id)
-            vars_data = orig_request.request if isinstance(orig_request.request, dict) else {}
+                workspace_path = self.run_manager.get_workspace_path(run_id)
 
-            # FIX: Only pass variables declared in variables.tf, with REPLACE_ME sanitized
-            safe_vars = _build_safe_tfvars(vars_data, workspace_path)
+                # Determine Provider
+                provider = vars_data.get("cloud_provider", orig_request.provider).lower()
 
-            vars_file = workspace_path / "terraform.tfvars.json"
-            vars_file.write_text(json.dumps(safe_vars, indent=2), encoding="utf-8")
-            logger.info("[%s] [OK] terraform.tfvars.json generated (%d vars)", run_id, len(safe_vars))
+                # ── CHECK 1: Cloud Credentials ────────────────────────────
+                if provider == "aws":
+                    if not config.AWS_ACCESS_KEY_ID or not config.AWS_SECRET_ACCESS_KEY:
+                        raise ValueError("AWS credentials not set in .env — cannot deploy.")
+                    logger.info("[%s] [OK] AWS Credentials found", run_id)
+                    if not config.AWS_REGION:
+                        raise ValueError("AWS_REGION is not set in .env — cannot deploy.")
+                    logger.info("[%s] [OK] AWS_REGION = %s", run_id, config.AWS_REGION)
+                elif provider == "digitalocean":
+                    if not os.getenv("DIGITALOCEAN_TOKEN"):
+                        raise ValueError("DIGITALOCEAN_TOKEN is not set in environment — cannot deploy to DO.")
+                    logger.info("[%s] [OK] DIGITALOCEAN_TOKEN found", run_id)
+                elif provider == "gcp":
+                    if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS") and not os.getenv("GCP_CREDENTIALS"):
+                        logger.warning("[%s] GCP credentials not strictly found, assuming external authentication.", run_id)
 
-            # ── CHECK 3: terraform init ────────────────────────────────
-            logger.info("[%s] Running terraform init...", run_id)
-            await asyncio.to_thread(
-                self._subprocess_run,
-                ["terraform", "init", "-input=false"],
-                workspace_path,
-            )
-            logger.info("[%s] [OK] terraform init OK", run_id)
+                # ── CHECK 2.5: Generate safe terraform.tfvars.json ────────
+                logger.info("[%s] Generating terraform.tfvars.json...", run_id)
+                safe_vars = _build_safe_tfvars(vars_data, workspace_path)
+                vars_file = workspace_path / "terraform.tfvars.json"
+                vars_file.write_text(json.dumps(safe_vars, indent=2), encoding="utf-8")
+                logger.info("[%s] [OK] terraform.tfvars.json generated (%d vars)", run_id, len(safe_vars))
 
-            # ── CHECK 4: terraform validate ───────────────────────────
-            logger.info("[%s] Running terraform validate...", run_id)
-            await asyncio.to_thread(
-                self._subprocess_run,
-                ["terraform", "validate"],
-                workspace_path,
-            )
-            logger.info("[%s] [OK] terraform validate OK", run_id)
+                # ── CHECK 3: terraform init ────────────────────────────────
+                logger.info("[%s] Running terraform init...", run_id)
+                await asyncio.to_thread(
+                    self._subprocess_run,
+                    ["terraform", "init", "-input=false"],
+                    workspace_path,
+                )
+                logger.info("[%s] [OK] terraform init OK", run_id)
 
-            # ── CHECK 5: terraform plan → save to tfplan ──────────────
-            logger.info("[%s] Running terraform plan...", run_id)
-            plan_result = await asyncio.to_thread(
-                self._subprocess_run_with_exitcode,
-                ["terraform", "plan", "-out=tfplan", "-no-color", "-input=false", "-detailed-exitcode"],
-                workspace_path,
-            )
-            # -detailed-exitcode: 0=no changes, 1=error, 2=changes present
-            if plan_result.returncode == 0:
-                logger.warning("[%s] [WARN] Terraform plan shows NO changes — nothing to apply. Marking complete.", run_id)
+                # ── CHECK 4: terraform validate ───────────────────────────
+                logger.info("[%s] Running terraform validate...", run_id)
+                await asyncio.to_thread(
+                    self._subprocess_run,
+                    ["terraform", "validate"],
+                    workspace_path,
+                )
+                logger.info("[%s] [OK] terraform validate OK", run_id)
+
+                # ── CHECK 5: terraform plan → save to tfplan ──────────────
+                logger.info("[%s] Running terraform plan...", run_id)
+                plan_result = await asyncio.to_thread(
+                    self._subprocess_run_with_exitcode,
+                    ["terraform", "plan", "-out=tfplan", "-no-color", "-input=false", "-detailed-exitcode"],
+                    workspace_path,
+                )
+                if plan_result.returncode == 0:
+                    logger.warning("[%s] [WARN] Terraform plan shows NO changes — nothing to apply. Marking complete.", run_id)
+                    run = self.run_manager.get_run(run_id)
+                    if run:
+                        run.status = RunStatus.COMPLETED
+                        run.plan_output = "No infrastructure changes needed — already up to date."
+                        self.run_manager.save_run_state(run_id, run)
+                    return
+                if plan_result.returncode == 1:
+                    raise subprocess.CalledProcessError(1, "terraform plan", plan_result.stdout, plan_result.stderr)
+                logger.info("[%s] [OK] terraform plan OK — changes detected", run_id)
+
+                # ── CHECK 6: Destructive resource scan ────────────────────
+                plan_text = plan_result.stdout or ""
+                destroyed = [
+                    line.strip() for line in plan_text.splitlines()
+                    if "will be destroyed" in line or "must be replaced" in line
+                ]
+                if destroyed:
+                    logger.warning(
+                        "[%s] [WARN] DESTRUCTIVE OPERATIONS DETECTED (%d resources):\n%s",
+                        run_id, len(destroyed), "\n".join(destroyed),
+                    )
+                    run = self.run_manager.get_run(run_id)
+                    if run:
+                        run.metadata = run.metadata or {}
+                        run.metadata["destructive_resources"] = destroyed
+                        self.run_manager.save_run_state(run_id, run)
+                else:
+                    logger.info("[%s] [OK] No destructive operations in plan", run_id)
+
+                # ── APPLY ─────────────────────────────────────────────────
+                logger.info("[%s] Applying terraform plan...", run_id)
+                outputs = await self._run_terraform_apply(workspace_path)
+
                 run = self.run_manager.get_run(run_id)
                 if run:
                     run.status = RunStatus.COMPLETED
-                    run.plan_output = "No infrastructure changes needed — already up to date."
+                    run.outputs = outputs
                     self.run_manager.save_run_state(run_id, run)
-                return
-            if plan_result.returncode == 1:
-                raise subprocess.CalledProcessError(1, "terraform plan", plan_result.stdout, plan_result.stderr)
-            logger.info("[%s] [OK] terraform plan OK — changes detected", run_id)
 
-            # ── CHECK 6: Destructive resource scan ────────────────────
-            plan_text = plan_result.stdout or ""
-            destroyed = [
-                line.strip() for line in plan_text.splitlines()
-                if "will be destroyed" in line or "must be replaced" in line
-            ]
-            if destroyed:
-                logger.warning(
-                    "[%s] [WARN] DESTRUCTIVE OPERATIONS DETECTED (%d resources):\n%s",
-                    run_id, len(destroyed), "\n".join(destroyed),
-                )
-                run = self.run_manager.get_run(run_id)
-                if run:
-                    run.metadata = run.metadata or {}
-                    run.metadata["destructive_resources"] = destroyed
-                    self.run_manager.save_run_state(run_id, run)
-            else:
-                logger.info("[%s] [OK] No destructive operations in plan", run_id)
-
-            # ── APPLY ─────────────────────────────────────────────────
-            logger.info("[%s] Applying terraform plan...", run_id)
-            outputs = await self._run_terraform_apply(workspace_path)
-
-            run = self.run_manager.get_run(run_id)
-            if run:
-                run.status = RunStatus.COMPLETED
-                run.outputs = outputs
-                self.run_manager.save_run_state(run_id, run)
-
-            logger.info("[%s] [OK] Apply phase complete", run_id)
+                logger.info("[%s] [OK] Apply phase complete", run_id)
 
         except subprocess.CalledProcessError as spe:
             stderr = spe.stderr or ""
@@ -540,19 +554,29 @@ class WorkflowEngine:
         Transitions: COMPLETED → DESTROYING → DESTROYED (or FAILED)
         """
         try:
-            self.run_manager.update_run_status(run_id, RunStatus.DESTROYING)
-            logger.info("[%s] Starting destroy phase", run_id)
+            from app.services import langfuse_service
+            
+            # Load original request to recover identity
+            orig_request = self._load_original_request(run_id)
+            _user_id = getattr(orig_request, "user_id", None)
+            _username = getattr(orig_request, "username", None)
+            vars_data = orig_request.request if isinstance(orig_request.request, dict) else {}
+            _session_id = vars_data.get("session_id")
 
-            workspace_path = self.run_manager.get_workspace_path(run_id)
-            await self._run_terraform_destroy(workspace_path)
+            with langfuse_service.user_context(user_id=_user_id, username=_username, session_id=_session_id):
+                self.run_manager.update_run_status(run_id, RunStatus.DESTROYING)
+                logger.info("[%s] Starting destroy phase", run_id)
 
-            run = self.run_manager.get_run(run_id)
-            if run:
-                run.status = RunStatus.DESTROYED
-                run.outputs = None
-                self.run_manager.save_run_state(run_id, run)
+                workspace_path = self.run_manager.get_workspace_path(run_id)
+                await self._run_terraform_destroy(workspace_path)
 
-            logger.info("[%s] Destroy phase complete", run_id)
+                run = self.run_manager.get_run(run_id)
+                if run:
+                    run.status = RunStatus.DESTROYED
+                    run.outputs = None
+                    self.run_manager.save_run_state(run_id, run)
+
+                logger.info("[%s] Destroy phase complete", run_id)
 
         except Exception as e:
             logger.error("[%s] Destroy failed: %s", run_id, e)
@@ -571,64 +595,76 @@ class WorkflowEngine:
         so user edits that re-introduce bad patterns are caught.
         """
         try:
-            logger.info("[%s] Revalidating after file edits", run_id)
-            workspace_path = self.run_manager.get_workspace_path(run_id)
+            from app.services import langfuse_service
+            
+            # Load original request to recover identity
+            orig_request = self._load_original_request(run_id)
+            _user_id = getattr(orig_request, "user_id", None)
+            _username = getattr(orig_request, "username", None)
+            vars_data = orig_request.request if isinstance(orig_request.request, dict) else {}
+            _session_id = vars_data.get("session_id")
 
-            # FIX: Re-sanitize the edited files before planning
-            # This catches cases where the user manually edits files and
-            # re-introduces patterns like aws_default_vpc, cidr_blocks, etc.
-            raw_bundle = TerraformBundle(
-                main_tf=self._read_file(workspace_path / "main.tf"),
-                variables_tf=self._read_file(workspace_path / "variables.tf"),
-                outputs_tf=self._read_file(workspace_path / "outputs.tf"),
-            )
-            # --- Sanitization step ---
-            sanitized = LLMGenerator._sanitize_bundle(raw_bundle)
+            with langfuse_service.user_context(user_id=_user_id, username=_username, session_id=_session_id):
+                logger.info("[%s] Revalidating after file edits", run_id)
+                workspace_path = self.run_manager.get_workspace_path(run_id)
 
-            # Write sanitized files back if anything changed
-            if (
-                sanitized.main_tf != raw_bundle.main_tf
-                or sanitized.variables_tf != raw_bundle.variables_tf
-                or sanitized.outputs_tf != raw_bundle.outputs_tf
-            ):
-                logger.info(
-                    "[%s] Sanitizer patched edited files — writing back to disk",
-                    run_id,
+                # FIX: Re-sanitize the edited files before planning
+                # This catches cases where the user manually edits files and
+                # re-introduces patterns like aws_default_vpc, cidr_blocks, etc.
+                raw_bundle = TerraformBundle(
+                    main_tf=self._read_file(workspace_path / "main.tf"),
+                    variables_tf=self._read_file(workspace_path / "variables.tf"),
+                    outputs_tf=self._read_file(workspace_path / "outputs.tf"),
                 )
-                self.workspace_manager.write_terraform_files(
-                    workspace_path, sanitized
-                )
+                # --- Sanitization step ---
+                sanitized = LLMGenerator._sanitize_bundle(raw_bundle)
 
-            bundle = sanitized  # ensure downstream uses sanitized version
+                # Write sanitized files back if anything changed
+                if (
+                    sanitized.main_tf != raw_bundle.main_tf
+                    or sanitized.variables_tf != raw_bundle.variables_tf
+                    or sanitized.outputs_tf != raw_bundle.outputs_tf
+                ):
+                    logger.info(
+                        "[%s] Sanitizer patched edited files — writing back to disk",
+                        run_id,
+                    )
+                    self.workspace_manager.write_terraform_files(
+                        workspace_path, sanitized
+                    )
 
-            # --- Security validation ---
-            if self.security_checker:
-                is_valid, error_msg = self.security_checker.validate(
-                    bundle, provider=provider
-                )
-                if not is_valid:
-                    msg = f"Security validation failed: {error_msg}"
+                bundle = sanitized  # ensure downstream uses sanitized version
+
+                # --- Security validation ---
+                if self.security_checker:
+                    is_valid, error_msg = self.security_checker.validate(
+                        bundle, provider=provider
+                    )
+                    if not is_valid:
+                        msg = f"Security validation failed: {error_msg}"
+                        logger.error("[%s] %s", run_id, msg)
+                        self.run_manager.update_run_status(
+                            run_id, RunStatus.FAILED, error=msg
+                        )
+                        return
+                    logger.info("[%s] Security validation passed", run_id)
+                else:
+                    msg = "SecurityChecker not available — fail-closed triggered."
                     logger.error("[%s] %s", run_id, msg)
                     self.run_manager.update_run_status(
                         run_id, RunStatus.FAILED, error=msg
                     )
                     return
-                logger.info("[%s] Security validation passed", run_id)
-            else:
-                logger.warning(
-                    "[%s] SecurityChecker not available — skipping validation",
-                    run_id,
-                )
 
-            plan_output = await self._run_terraform_plan(workspace_path)
+                plan_output = await self._run_terraform_plan(workspace_path)
 
-            run = self.run_manager.get_run(run_id)
-            if run:
-                run.status = RunStatus.PLANNED
-                run.plan_output = plan_output
-                self.run_manager.save_run_state(run_id, run)
+                run = self.run_manager.get_run(run_id)
+                if run:
+                    run.status = RunStatus.PLANNED
+                    run.plan_output = plan_output
+                    self.run_manager.save_run_state(run_id, run)
 
-            logger.info("[%s] Re-planning complete", run_id)
+                logger.info("[%s] Re-planning complete", run_id)
 
         except Exception as e:
             logger.error("[%s] Revalidation failed: %s", run_id, e)
@@ -798,6 +834,8 @@ class WorkflowEngine:
             request=data.get("request", ""),
             provider=data.get("provider", "aws"),
             auto_approve=data.get("auto_approve", False),
+            user_id=data.get("user_id"),
+            username=data.get("username"),
         )
 
     @staticmethod

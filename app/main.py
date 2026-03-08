@@ -121,10 +121,40 @@ app.add_middleware(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _rate_id(user: Optional[Dict], x_user_id: Optional[str]) -> str:
+def _extract_identity(
+    user: Optional[Dict], 
+    x_user_id: Optional[str], 
+    session_id: Optional[str] = None
+) -> tuple[Optional[str], Optional[str]]:
+    """
+    Robust identity extraction with fallbacks:
+    1. Authenticated user (Firebase/Auth)
+    2. X-User-ID Header (Dev/Local fallback)
+    3. Session ID (to group anonymous traces)
+    4. "anonymous" (final fallback)
+    """
+    # 1. Firebase Auth
     if user:
-        return user.get("uid") or user.get("user_id") or "anonymous"
-    return x_user_id or "anonymous"
+        uid = user.get("uid") or user.get("user_id")
+        email = user.get("email") or user.get("name")
+        if uid:
+            return uid, email
+    
+    # 2. Header Fallback
+    if x_user_id:
+        return x_user_id, f"{x_user_id}@header"
+
+    # 3. Session Fallback
+    if session_id:
+        # Use session_id as the user_id if we have nothing else
+        return session_id, f"anon-{session_id[:8]}"
+
+    return "anonymous", "anonymous"
+
+
+def _get_rate_id(user: Optional[Dict], x_user_id: Optional[str]) -> str:
+    uid, _ = _extract_identity(user, x_user_id)
+    return uid or "anonymous"
 
 
 def _build_agent_request(terraform_params: dict) -> AgentRequest:
@@ -138,8 +168,22 @@ def _build_agent_request(terraform_params: dict) -> AgentRequest:
 
 async def _launch_planning(session_id: str, background_tasks: Optional[BackgroundTasks] = None) -> str:
     """Build AgentRequest from a completed session, create a run, and start planning."""
+    from app.services import langfuse_service
+    
     terraform_params = conversation_manager.build_terraform_request(session_id)
     agent_request    = _build_agent_request(terraform_params)
+    
+    # Persist user identity in AgentRequest for background task retrieval
+    session = conversation_manager.get_session(session_id)
+    if session:
+        # Robust fallback: if session has no user_id (anonymous session), use session_id itself
+        _user_id = session.user_id or session_id
+        _username = session.username or f"anon-{session_id[:8]}"
+        
+        agent_request.user_id = _user_id
+        agent_request.username = _username
+        logger.info("[%s] Persisted user identity in AgentRequest: user_id=%s", session_id, _user_id)
+
     run              = run_manager.create_run(agent_request)
     run.metadata     = {
         "conversation_params": conversation_manager.get_collected_parameters(session_id),
@@ -231,18 +275,20 @@ async def create_conversation(
         raise HTTPException(status_code=400, detail="owner and repo are required.")
 
     if redis_client:
-        await check_rate_limit(_rate_id(user, x_user_id), redis_client)
+        await check_rate_limit(_get_rate_id(user, x_user_id), redis_client)
 
     try:
-        # Extract user_id and username from authenticated user
-        user_id = user.get("uid") if user else None
-        username = user.get("email") if user else None
+        from app.services import langfuse_service
         
-        result = await conversation_manager.create_session(
-            owner=owner, repo=repo,
-            github_token=github_token, github_branch=github_branch,
-            user_id=user_id, username=username,
-        )
+        # Extract identity with robust fallbacks
+        user_id, username = _extract_identity(user, x_user_id)
+        
+        with langfuse_service.user_context(user_id=user_id, username=username):
+            result = await conversation_manager.create_session(
+                owner=owner, repo=repo,
+                github_token=github_token, github_branch=github_branch,
+                user_id=user_id, username=username,
+            )
         return ConversationCreateResponse(
             session_id=result["session_id"],
             bot_response=result["bot_response"],
@@ -261,17 +307,21 @@ async def send_message(
     user: Optional[Dict] = Depends(get_current_user),
     x_user_id: Optional[str] = Header(None),
 ):
-    if redis_client:
-        await check_rate_limit(_rate_id(user, x_user_id), redis_client)
-
-    if not conversation_manager.get_session(session_id):
+    session = conversation_manager.get_session(session_id)
+    if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
+    if redis_client:
+        await check_rate_limit(_get_rate_id(user, x_user_id), redis_client)
+
     try:
-        response = await conversation_manager.process_message(
-            session_id=session_id,
-            user_message=chat_message.message,
-        )
+        from app.services import langfuse_service
+        
+        with langfuse_service.user_context(user_id=session.user_id, username=session.username, session_id=session_id):
+            response = await conversation_manager.process_message(
+                session_id=session_id,
+                user_message=chat_message.message,
+            )
         if response.is_complete:
             # Guard: only auto-generate if no run already exists for this session
             existing_params = conversation_manager.get_collected_parameters(session_id)
@@ -295,12 +345,13 @@ async def stream_message(
     session_id: str,
     chat_message: ChatMessage,
     user: Optional[Dict] = Depends(get_current_user),
+    x_user_id: Optional[str] = Header(None),
 ):
     import json
 
     async def generate():
         if redis_client:
-            await check_rate_limit(user.get("uid", "anonymous") if user else "anonymous", redis_client)
+            await check_rate_limit(_get_rate_id(user, x_user_id), redis_client)
 
         session = conversation_manager.get_session(session_id)
         if not session:
@@ -308,10 +359,13 @@ async def stream_message(
             return
 
         try:
-            response = await conversation_manager.process_message(
-                session_id=session_id,
-                user_message=chat_message.message,
-            )
+            from app.services import langfuse_service
+            
+            with langfuse_service.user_context(user_id=session.user_id, username=session.username, session_id=session_id):
+                response = await conversation_manager.process_message(
+                    session_id=session_id,
+                    user_message=chat_message.message,
+                )
         except Exception as e:
             logger.error("[%s] stream process_message failed: %s", session_id, e, exc_info=True)
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
@@ -472,13 +526,23 @@ async def create_run(
     x_user_id: Optional[str] = Header(None),
 ):
     if redis_client:
-        await check_rate_limit(x_user_id or "anonymous", redis_client)
+        await check_rate_limit(_get_rate_id(user, x_user_id), redis_client)
     request.provider = "aws"
     try:
-        run = run_manager.create_run(request)
-        logger.info("[%s] Created AWS run", run.run_id)
-        background_tasks.add_task(workflow_engine.execute_planning_phase, run.run_id, request)
-        return run
+        from app.services import langfuse_service
+        
+        # Extract identity with robust fallbacks
+        user_id, username = _extract_identity(user, x_user_id)
+        
+        # Explicitly assign to request so it is persisted to disk/metadata
+        request.user_id = user_id
+        request.username = username
+
+        with langfuse_service.user_context(user_id=user_id, username=username):
+            run = run_manager.create_run(request)
+            logger.info("[%s] Created AWS run", run.run_id)
+            background_tasks.add_task(workflow_engine.execute_planning_phase, run.run_id, request)
+            return run
     except Exception as e:
         logger.error("create_run failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -509,25 +573,28 @@ async def chat_about_run(
         run_manager.update_run_status(run_id, RunStatus.REVIEWING)
 
     if redis_client:
-        await check_rate_limit(x_user_id or "anonymous", redis_client)
+        await check_rate_limit(_get_rate_id(user, x_user_id), redis_client)
 
     try:
-        context = (
-            f"Explain the Terraform plan briefly using AWS terminology.\n\n"
-            f"PLAN:\n{run.plan_output or 'Not available'}\n\n"
-            f"QUESTION: {chat_request.message}"
-        )
-        # Extract session identity so the Langfuse trace links to the user
+        from app.services import langfuse_service
+        
+        # Extract identity with robust fallbacks
+        user_id, username = _extract_identity(user, x_user_id)
         _session_id = (run.metadata or {}).get("session_id")
-        _user_id = user.get("uid") if user else None
-        _username = user.get("email") if user else None
-        text = await llm_generator.chat_about_plan(
-            context,
-            session_id=_session_id,
-            user_id=_user_id,
-            username=_username,
-        )
-        return ChatResponse(response=text, timestamp=datetime.now().isoformat())
+        
+        with langfuse_service.user_context(user_id=user_id, username=username, session_id=_session_id):
+            context = (
+                f"Explain the Terraform plan briefly using AWS terminology.\n\n"
+                f"PLAN:\n{run.plan_output or 'Not available'}\n\n"
+                f"QUESTION: {chat_request.message}"
+            )
+            text = await llm_generator.chat_about_plan(
+                context,
+                session_id=_session_id,
+                user_id=_user_id,
+                username=_username,
+            )
+            return ChatResponse(response=text, timestamp=datetime.now().isoformat())
     except Exception as e:
         logger.error("[%s] chat_about_run failed: %s", run_id, e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -548,13 +615,29 @@ async def edit_run(
         raise HTTPException(status_code=400, detail=f"Cannot edit run in status: {run.status}")
 
     if redis_client:
-        await check_rate_limit(x_user_id or "anonymous", redis_client)
-    run = run_manager.update_run_status(run_id, RunStatus.PLANNING)
-    background_tasks.add_task(
-        workflow_engine.execute_planning_phase,
-        run_id=run.run_id, request=None, feedback=edit_request.message,
-    )
-    return run
+        await check_rate_limit(_get_rate_id(user, x_user_id), redis_client)
+    
+    try:
+        from app.services import langfuse_service
+        
+        # Extract identity with robust fallbacks
+        _session_id = (run.metadata or {}).get("session_id")
+        user_id, username = _extract_identity(user, x_user_id, session_id=_session_id)
+        
+        with langfuse_service.user_context(user_id=user_id, username=username, session_id=_session_id):
+            # Create a mock AgentRequest to hold identity for the background task
+            # (edit_run often passes request=None to execute_planning_phase)
+            temp_request = AgentRequest(request=edit_request.message, user_id=user_id, username=username)
+            
+            run = run_manager.update_run_status(run_id, RunStatus.PLANNING)
+            background_tasks.add_task(
+                workflow_engine.execute_planning_phase,
+                run_id=run.run_id, request=temp_request, feedback=edit_request.message,
+            )
+            return run
+    except Exception as e:
+        logger.error("[%s] edit_run failed: %s", run_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/runs/{run_id}/files")
@@ -590,10 +673,19 @@ async def edit_run_files(run_id: str, files: dict, background_tasks: BackgroundT
         if key in files:
             (workspace / fname).write_text(files[key], encoding="utf-8")
 
-    run = run_manager.update_run_status(run_id, RunStatus.PLANNING)
-    # revalidate_and_replan now re-sanitizes before planning
-    background_tasks.add_task(workflow_engine.revalidate_and_replan, run_id, "aws")
-    return run
+    try:
+        from app.services import langfuse_service
+        _user_id = user.get("uid") if user else None
+        _username = user.get("email") if user else None
+        
+        with langfuse_service.user_context(user_id=_user_id, username=_username):
+            run = run_manager.update_run_status(run_id, RunStatus.PLANNING)
+            # revalidate_and_replan now re-sanitizes before planning
+            background_tasks.add_task(workflow_engine.revalidate_and_replan, run_id, "aws")
+            return run
+    except Exception as e:
+        logger.error("[%s] edit_run_files failed: %s", run_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/runs/{run_id}/approve", response_model=RunResponse)
@@ -604,10 +696,19 @@ async def approve_run(run_id: str, background_tasks: BackgroundTasks, user: Dict
     if run.status not in [RunStatus.PLANNED, RunStatus.REVIEWING]:
         raise HTTPException(status_code=400, detail=f"Cannot approve run in status: {run.status}")
 
-    run = run_manager.update_run_status(run_id, RunStatus.APPROVED)
-    logger.info("[%s] Run approved", run_id)
-    background_tasks.add_task(workflow_engine.execute_apply_phase, run_id)
-    return run
+    try:
+        from app.services import langfuse_service
+        _user_id = user.get("uid") if user else None
+        _username = user.get("email") if user else None
+        
+        with langfuse_service.user_context(user_id=_user_id, username=_username):
+            run = run_manager.update_run_status(run_id, RunStatus.APPROVED)
+            logger.info("[%s] Run approved", run_id)
+            background_tasks.add_task(workflow_engine.execute_apply_phase, run_id)
+            return run
+    except Exception as e:
+        logger.error("[%s] approve_run failed: %s", run_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/runs/{run_id}/reject", response_model=RunResponse)
@@ -631,8 +732,17 @@ async def destroy_run(run_id: str, background_tasks: BackgroundTasks, user: Dict
     if run.status != RunStatus.COMPLETED:
         raise HTTPException(status_code=400, detail="Can only destroy COMPLETED runs.")
 
-    background_tasks.add_task(workflow_engine.execute_destroy_phase, run_id)
-    return run_manager.update_run_status(run_id, RunStatus.DESTROYING)
+    try:
+        from app.services import langfuse_service
+        _user_id = user.get("uid") if user else None
+        _username = user.get("email") if user else None
+        
+        with langfuse_service.user_context(user_id=_user_id, username=_username):
+            background_tasks.add_task(workflow_engine.execute_destroy_phase, run_id)
+            return run_manager.update_run_status(run_id, RunStatus.DESTROYING)
+    except Exception as e:
+        logger.error("[%s] destroy_run failed: %s", run_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/runs/{run_id}/redeploy", response_model=RunResponse)
@@ -647,10 +757,19 @@ async def redeploy_run(run_id: str, background_tasks: BackgroundTasks, user: Dic
             detail=f"Cannot redeploy run in status: {run.status}. Use 'Approve' if the run is still in review."
         )
 
-    run = run_manager.update_run_status(run_id, RunStatus.APPROVED)
-    logger.info("[%s] Redeploy triggered", run_id)
-    background_tasks.add_task(workflow_engine.execute_apply_phase, run_id)
-    return run
+    try:
+        from app.services import langfuse_service
+        _user_id = user.get("uid") if user else None
+        _username = user.get("email") if user else None
+        
+        with langfuse_service.user_context(user_id=_user_id, username=_username):
+            run = run_manager.update_run_status(run_id, RunStatus.APPROVED)
+            logger.info("[%s] Redeploy triggered", run_id)
+            background_tasks.add_task(workflow_engine.execute_apply_phase, run_id)
+            return run
+    except Exception as e:
+        logger.error("[%s] redeploy_run failed: %s", run_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Email approval workflow ───────────────────────────────────────────────────
@@ -715,16 +834,18 @@ async def approve_via_email(token: str, background_tasks: BackgroundTasks):
     if run.status not in [RunStatus.PLANNED, RunStatus.REVIEWING]:
         return HTMLResponse(f"<h1> Cannot Approve</h1><p>Status is {run.status}.</p>", status_code=400)
 
-    run = run_manager.update_run_status(run_id, RunStatus.APPROVED)
-    if not run.approval_info:
-        run.approval_info = {}
-    run.approval_info.update({
-        "approved_at": datetime.utcnow().isoformat(),
-        "approved_by": user_email, "method": "email_link", "status": "approved",
-    })
-    run_manager.save_run_state(run_id, run)
-    background_tasks.add_task(workflow_engine.execute_apply_phase, run_id)
-    email_service.send_approval_confirmation_email(user_email, run_id, approved=True)
+    from app.services import langfuse_service
+    with langfuse_service.user_context(username=user_email):
+        run = run_manager.update_run_status(run_id, RunStatus.APPROVED)
+        if not run.approval_info:
+            run.approval_info = {}
+        run.approval_info.update({
+            "approved_at": datetime.utcnow().isoformat(),
+            "approved_by": user_email, "method": "email_link", "status": "approved",
+        })
+        run_manager.save_run_state(run_id, run)
+        background_tasks.add_task(workflow_engine.execute_apply_phase, run_id)
+        email_service.send_approval_confirmation_email(user_email, run_id, approved=True)
 
     return HTMLResponse(f"""
     <html><head><title>Approved</title></head>
