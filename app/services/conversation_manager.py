@@ -602,7 +602,7 @@ class ConversationManager:
         return {
             "session_id": sid,
             "bot_response": greeting,
-            "suggestions": ["AWS", "GCP"],
+            "suggestions": ["AWS", "GCP", "DigitalOcean"],
         }
 
     async def _fetch_readme(self, owner: str, repo: str, token: str, branch: str) -> str:
@@ -852,274 +852,245 @@ class ConversationManager:
                 if not cp.get("gcp_region") and not cp.get("region"):
                     pending.append(
                         "  - GCP Region (REQUIRED): e.g. us-central1 (Iowa), us-east1 (S. Carolina), "
-                            "europe-west1 (Belgium). Pick closest to your users."
-                        )
-                    if cp.get("iap_tunnel") is None and cp.get("ssh_key_name") is None:
-                        pending.append(
-                            "  - VM Access (REQUIRED): Use IAP Tunnel (recommended — no open ports, no key) "
-                            "or provide an SSH public key?"
-                        )
-                    if cp.get("alert_email") is None:
-                        pending.append(
-                            "  - Alert Email: for Cloud Monitoring CPU/error alerts. Say 'skip' to disable."
-                        )
-                    for svc, key, hint in [
-                        ("cloud_sql",     "db_config",      "Cloud SQL: engine (PostgreSQL/MySQL), tier (db-f1-micro for dev)"),
-                        ("firestore",     "db_config",      "Firestore mode: Native (realtime) or Datastore?"),
-                        ("memorystore",   "cache_config",   "Memorystore Redis: tier BASIC, capacity 1 GB for dev"),
-                        ("cloud_storage", "storage_config", "Cloud Storage: bucket name, public read yes/no"),
-                    ]:
-                        if svc in svcs and not cp.get(key):
-                            pending.append(f"  - {hint}")
-                elif is_do:
-                    # DO dev
-                    if not cp.get("do_region") and not cp.get("region"):
-                        pending.append(
-                            "  - DO Region (REQUIRED): e.g. nyc3 (New York), fra1 (Frankfurt), sgp1 (Singapore). "
-                            "Tip: pick closest to your users."
-                        )
-                    if cp.get("ssh_key_name") is None:
-                        pending.append(
-                            "  - SSH Key (REQUIRED): your DigitalOcean SSH key name for Droplet access. "
-                            "Say 'skip' to use password-based SSH (not recommended)."
-                        )
-                    if cp.get("alert_email") is None:
-                        pending.append(
-                            "  - Alert Email: for DO Monitoring alerts. Say 'skip' to disable."
-                        )
-                    for svc, key, hint in [
-                        ("pg",     "db_config",      "DO Managed PostgreSQL: node plan (db-s-1vcpu-1gb for dev)"),
-                        ("mysql",  "db_config",      "DO Managed MySQL: node plan (db-s-1vcpu-1gb for dev)"),
-                        ("mongo",  "db_config",      "DO Managed MongoDB: node plan (db-s-1vcpu-1gb for dev)"),
-                        ("redis",  "cache_config",   "DO Managed Redis: node plan (db-s-1vcpu-1gb for dev)"),
-                        ("spaces", "storage_config", "DO Spaces: bucket name, public access yes/no"),
-                    ]:
-                        if svc in svcs and not cp.get(key):
-                            pending.append(f"  - {hint}")
-                else:
-                    # AWS dev
-                    if not cp.get("aws_region") and not cp.get("region"):
-                        pending.append(
-                            "  - AWS Region (REQUIRED): e.g. us-east-1 (N. Virginia), ap-south-1 (Mumbai). "
-                            "Tip: pick closest to your users."
-                        )
-                    if cp.get("ssh_key_name") is None and cp.get("key_pair_name") is None:
-                        pending.append(
-                            "  - EC2 Key Pair (REQUIRED): your AWS key pair name for SSH. "
-                            "Say 'skip' to use SSM Session Manager instead."
-                        )
-                    if cp.get("ssh_allowed_cidrs") is None:
-                        pending.append(
-                            "  - SSH CIDR (REQUIRED): your IP to restrict SSH — e.g. ['1.2.3.4/32']. "
-                            "Say 'skip' to defer."
-                        )
-                    if cp.get("alert_email") is None:
-                        pending.append(
-                            "  - Alert Email: email for CloudWatch alerts. Say 'skip' to disable."
-                        )
-                    for svc, key, hint in [
-                        ("rds",         "rds_config",     "RDS: engine (MySQL/PostgreSQL), skip Multi-AZ for dev"),
-                        ("dynamodb",    "db_config",      "DynamoDB: table name, billing mode (PAY_PER_REQUEST for dev)"),
-                        ("elasticache", "cache_config",   "ElastiCache: node type → cache.t3.micro for dev"),
-                        ("s3",          "storage_config", "S3: bucket name, public access yes/no"),
-                        ("sqs",         "sqs_config",     "SQS: queue name, message retention"),
-                    ]:
-                        if svc in svcs and not cp.get(key):
-                            pending.append(f"  - {hint}")
-
-            else:
-                # ══ PROD MODE ══
-
-                if dau is None:
-                    if is_do:
-                        svc_name = "DigitalOcean"
-                    elif is_gcp:
-                        svc_name = "GCP"
-                    else:
-                        svc_name = "AWS"
-                    pending.append(
-                        f"  - 🚦 TRAFFIC SIZING (ask this FIRST): How many daily active users at launch? "
-                        f"This determines Droplet/instance plan, load balancer, and autoscaling for {svc_name}. "
-                        f"Examples: 200 DAU → small single server, 1000 DAU → medium + load balancer, "
-                        f"5000 DAU → large + {svc_name} LB (3–8 servers)."
+                        "europe-west1 (Belgium). Pick closest to your users."
                     )
-                    return "\n\nPROD SETUP — cover one question per turn (START HERE):\n" + "\n".join(pending) + "\n"
-
-                if tier in ("medium", "high", "extreme") and cp.get("enable_multi_az") is None:
-                    if is_do:
-                        ha_detail = "multiple Droplets behind DO Load Balancer — seamless traffic distribution."
-                    elif is_gcp:
-                        ha_detail = "Regional MIG (multi-zone failover in GCP) — ~60s failover time."
-                    else:
-                        ha_detail = "Multi-AZ for RDS + ElastiCache — automatic failover in ~60s."
+                if cp.get("iap_tunnel") is None and cp.get("ssh_key_name") is None:
                     pending.append(
-                        f"  - 🔄 HIGH AVAILABILITY: With {_safe_int(dau):,} DAU you need zero-downtime. "
-                        f"Enable {ha_detail} "
-                        f"Yes = higher reliability, No = cheaper single-zone."
+                        "  - VM Access (REQUIRED): Use IAP Tunnel (recommended — no open ports, no key) "
+                        "or provide an SSH public key?"
                     )
-
-                if cp.get("use_asg"):
-                    asg = cp.get("autoscaling_config") or {}
-                    if not asg.get("cpu_threshold"):
-                        pending.append(
-                            f"  - ⚡ AUTO SCALING threshold: at what CPU% should we add a new VM? "
-                            f"Recommend 70% — gives headroom before users feel slowness. "
-                            f"(Setup: {asg.get('min_instances', 2)}–{asg.get('max_instances', 4)} VMs)"
-                        )
-                    if not asg.get("health_check_path"):
-                        if is_do:
-                            hc_name = "DO Load Balancer"
-                        elif is_gcp:
-                            hc_name = "GCP HTTP Health Check"
-                        else:
-                            hc_name = "ALB"
-                        pending.append(
-                            f"  - 🏥 HEALTH CHECK path for the {hc_name}: e.g. /health, /api/health, / "
-                            f"— must return HTTP 200."
-                        )
-
-                if cp.get("custom_domain") is None:
-                    if is_do:
-                        dns_hint = "DO DNS + Let's Encrypt SSL (via Certbot on Droplet)"
-                    elif is_gcp:
-                        dns_hint = "Cloud DNS + Google-managed SSL"
-                    else:
-                        dns_hint = "Route 53 + ACM SSL cert (free)"
-                    pending.append(
-                        f"  - 🌐 CUSTOM DOMAIN: do you have a domain (e.g. myapp.com)? "
-                        f"Yes → we'll configure {dns_hint}. "
-                        f"No → use the LB's auto-generated IP/DNS."
-                    )
-
                 if cp.get("alert_email") is None:
-                    if is_do:
-                        alert_svc = "DO Monitoring"
-                    elif is_gcp:
-                        alert_svc = "Cloud Monitoring + Uptime Checks"
-                    else:
-                        alert_svc = "CloudWatch"
                     pending.append(
-                        f"  - 📧 ALERT EMAIL: where should {alert_svc} send CPU spike / error alerts? "
-                        f"Essential for production — you want to know before users complain. "
-                        f"Say 'skip' to disable."
+                        "  - Alert Email: for Cloud Monitoring CPU/error alerts. Say 'skip' to disable."
                     )
+                for svc, key, hint in [
+                    ("cloud_sql",     "db_config",      "Cloud SQL: engine (PostgreSQL/MySQL), tier (db-f1-micro for dev)"),
+                    ("firestore",     "db_config",      "Firestore mode: Native (realtime) or Datastore?"),
+                    ("memorystore",   "cache_config",   "Memorystore Redis: tier BASIC, capacity 1 GB for dev"),
+                    ("cloud_storage", "storage_config", "Cloud Storage: bucket name, public read yes/no"),
+                ]:
+                    if svc in svcs and not cp.get(key):
+                        pending.append(f"  - {hint}")
 
-                if is_gcp:
-                    if cp.get("iap_tunnel") is None and cp.get("ssh_key_name") is None:
-                        pending.append(
-                            "  - 🔑 VM ACCESS: IAP Tunnel (recommended — no open ports, full audit log) "
-                            "or provide SSH public key? For production, IAP is the GCP best practice."
-                        )
-                elif is_do:
-                    if cp.get("ssh_key_name") is None:
-                        pending.append(
-                            "  - 🔑 SSH KEY: your DO SSH key name as saved in your DigitalOcean account. "
-                            "Used to access Droplets securely — no password needed."
-                        )
-                else:
-                    if cp.get("ssh_key_name") is None and cp.get("key_pair_name") is None:
-                        pending.append(
-                            "  - 🔑 SSH ACCESS: your EC2 key pair name, or 'skip' for SSM Session Manager. "
-                            "For prod, SSM is often better — no open port 22, full audit trail."
-                        )
-                    if cp.get("ssh_allowed_cidrs") is None:
-                        pending.append(
-                            "  - 🛡️  SSH CIDR: restrict SSH to your office/VPN IP. "
-                            "NEVER use 0.0.0.0/0 in production. e.g. ['203.0.113.5/32']."
-                        )
+            elif is_do:
+                if not cp.get("do_region") and not cp.get("region"):
+                    pending.append(
+                        "  - DO Region (REQUIRED): e.g. nyc3 (New York), fra1 (Frankfurt), sgp1 (Singapore). "
+                        "Tip: pick closest to your users."
+                    )
+                if cp.get("ssh_key_name") is None:
+                    pending.append(
+                        "  - SSH Key (REQUIRED): your DigitalOcean SSH key name for Droplet access. "
+                        "Say 'skip' to use password-based SSH (not recommended)."
+                    )
+                if cp.get("alert_email") is None:
+                    pending.append(
+                        "  - Alert Email: for DO Monitoring alerts. Say 'skip' to disable."
+                    )
+                for svc, key, hint in [
+                    ("pg",     "db_config",      "DO Managed PostgreSQL: node plan (db-s-1vcpu-1gb for dev)"),
+                    ("mysql",  "db_config",      "DO Managed MySQL: node plan (db-s-1vcpu-1gb for dev)"),
+                    ("mongo",  "db_config",      "DO Managed MongoDB: node plan (db-s-1vcpu-1gb for dev)"),
+                    ("redis",  "cache_config",   "DO Managed Redis: node plan (db-s-1vcpu-1gb for dev)"),
+                    ("spaces", "storage_config", "DO Spaces: bucket name, public access yes/no"),
+                ]:
+                    if svc in svcs and not cp.get(key):
+                        pending.append(f"  - {hint}")
 
-                if is_gcp:
-                    if not cp.get("gcp_region") and not cp.get("region"):
-                        pending.append(
-                            "  -  GCP REGION: us-central1 (USA), us-east1 (S. Carolina), europe-west1 (Belgium), "
-                            "asia-east1 (Taiwan), asia-south1 (Mumbai). Regional MIG works in all main regions."
-                        )
-                elif is_do:
-                    if not cp.get("do_region") and not cp.get("region"):
-                        pending.append(
-                            "  -  DO REGION: nyc3 (New York), sfo3 (San Francisco), fra1 (Frankfurt), "
-                            "sgp1 (Singapore), ams3 (Amsterdam). DO LB is region-scoped."
-                        )
-                else:
-                    if not cp.get("aws_region") and not cp.get("region"):
-                        pending.append(
-                            "  -  AWS REGION: us-east-1 (USA), eu-west-1 (Europe), ap-south-1 (India), "
-                            "ap-southeast-1 (SE Asia). Multi-AZ works in all main regions."
-                        )
-
-                if is_gcp:
-                    for svc, key, hint in [
-                        ("cloud_sql", "db_config",
-                         f"Cloud SQL HA: engine, tier (db-n1-standard-1 for medium traffic), "
-                         f"failover replica={'YES (already enabled)' if cp.get('enable_multi_az') else 'TBD'}"),
-                        ("firestore",     "db_config",      "Firestore mode: Native (realtime/document) or Datastore?"),
-                        ("memorystore",   "cache_config",   "Memorystore Redis: STANDARD_HA tier recommended for prod, capacity 1-5 GB"),
-                        ("cloud_storage", "storage_config", "Cloud Storage: bucket name, versioning, lifecycle rules"),
-                        ("pubsub",        "pubsub_config",  "Pub/Sub: topic + subscription names, message retention"),
-                        ("cloud_tasks",   "tasks_config",   "Cloud Tasks: queue name, max concurrent dispatches"),
-                    ]:
-                        if svc in svcs and not cp.get(key):
-                            pending.append(f"  - {hint}")
-                elif is_do:
-                    for svc, key, hint in [
-                        ("pg",     "db_config",
-                         f"DO Managed PostgreSQL: node plan → {'db-s-2vcpu-4gb' if tier in ('high','extreme') else 'db-s-1vcpu-2gb'}"),
-                        ("mysql",  "db_config",
-                         f"DO Managed MySQL: node plan → {'db-s-2vcpu-4gb' if tier in ('high','extreme') else 'db-s-1vcpu-2gb'}"),
-                        ("mongo",  "db_config",  "DO Managed MongoDB: node plan, version (6 recommended)"),
-                        ("redis",  "cache_config",
-                         f"DO Managed Redis: node plan → {'db-s-1vcpu-2gb' if tier in ('high','extreme') else 'db-s-1vcpu-1gb'}"),
-                        ("spaces", "storage_config", "DO Spaces: bucket name + CDN endpoint, region"),
-                    ]:
-                        if svc in svcs and not cp.get(key):
-                            pending.append(f"  - {hint}")
-                else:
-                    for svc, key, hint in [
-                        ("rds", "rds_config",
-                         f"RDS config: engine, Multi-AZ={'YES' if cp.get('enable_multi_az') else 'TBD'}, "
-                         f"instance class → {'db.t3.medium' if tier in ('high','extreme') else 'db.t3.small'}"),
-                        ("dynamodb",    "db_config",
-                         "DynamoDB: table name, billing mode (PAY_PER_REQUEST recommended for prod)"),
-                        ("elasticache", "cache_config",
-                         f"ElastiCache: node type → {'cache.t3.medium' if tier in ('high','extreme') else 'cache.t3.micro'}, "
-                         f"Multi-AZ={'YES' if cp.get('enable_multi_az') else 'NO'}"),
-                        ("s3",          "storage_config", "S3: bucket name, versioning yes/no, public access"),
-                        ("sqs",         "sqs_config",     "SQS: queue names, visibility timeout, DLQ yes/no"),
-                        ("ses",         "ses_config",     "SES: verified domain or email for transactional email sending"),
-                        ("cognito",     "auth_config",    "Cognito: User Pool name, MFA yes/no, OAuth flows needed"),
-                        ("cloudfront",  "cdn_config",     "CloudFront: origin domain, price class, custom error pages"),
-                        ("waf",         "waf_config",     "WAF: managed rule groups (SQL injection, rate limiting)"),
-                    ]:
-                        if svc in svcs and not cp.get(key):
-                            pending.append(f"  - {hint}")
-
-            # Secrets Manager — all providers
-            if is_do:
-                secrets_key = "use_do_secrets"
-            elif is_gcp:
-                secrets_key = "use_secret_manager"
             else:
-                secrets_key = "use_secrets_manager"
-            if not cp.get(secrets_key):
-                secret_vars = [
-                    ev.get("name", "") for ev in (cp.get("required_env_vars") or [])
-                    if isinstance(ev, dict) and ev.get("is_secret")
-                ]
-                if secret_vars:
-                    if is_do:
-                        svc_name = "DO App Platform env vars"
-                    elif is_gcp:
-                        svc_name = "GCP Secret Manager"
-                    else:
-                        svc_name = "AWS Secrets Manager"
+                # AWS dev
+                if not cp.get("aws_region") and not cp.get("region"):
                     pending.append(
-                        f"  - 🔐 {svc_name}: README has {len(secret_vars)} secret(s) "
-                        f"({', '.join(secret_vars[:3])}{'...' if len(secret_vars) > 3 else ''}). "
-                        f"Store them securely? Strongly recommended for all environments."
+                        "  - AWS Region (REQUIRED): e.g. us-east-1 (N. Virginia), ap-south-1 (Mumbai). "
+                        "Tip: pick closest to your users."
+                    )
+                if cp.get("ssh_key_name") is None and cp.get("key_pair_name") is None:
+                    pending.append(
+                        "  - EC2 Key Pair (REQUIRED): your AWS key pair name for SSH. "
+                        "Say 'skip' to use SSM Session Manager instead."
+                    )
+                if cp.get("ssh_allowed_cidrs") is None:
+                    pending.append(
+                        "  - SSH CIDR (REQUIRED): your IP to restrict SSH — e.g. ['1.2.3.4/32']. "
+                        "Say 'skip' to defer."
+                    )
+                if cp.get("alert_email") is None:
+                    pending.append(
+                        "  - Alert Email: email for CloudWatch alerts. Say 'skip' to disable."
+                    )
+                for svc, key, hint in [
+                    ("rds",         "rds_config",     "RDS: engine (MySQL/PostgreSQL), skip Multi-AZ for dev"),
+                    ("dynamodb",    "db_config",      "DynamoDB: table name, billing mode (PAY_PER_REQUEST for dev)"),
+                    ("elasticache", "cache_config",   "ElastiCache: node type → cache.t3.micro for dev"),
+                    ("s3",          "storage_config", "S3: bucket name, public access yes/no"),
+                    ("sqs",         "sqs_config",     "SQS: queue name, message retention"),
+                ]:
+                    if svc in svcs and not cp.get(key):
+                        pending.append(f"  - {hint}")
+
+        else:
+            # ══ PROD MODE ══
+            if dau is None:
+                svc_name = "DigitalOcean" if is_do else ("GCP" if is_gcp else "AWS")
+                pending.append(
+                    f"  - 🚦 TRAFFIC SIZING (ask this FIRST): How many daily active users at launch? "
+                    f"This determines Droplet/instance plan, load balancer, and autoscaling for {svc_name}. "
+                    f"Examples: 200 DAU → small single server, 1000 DAU → medium + load balancer, "
+                    f"5000 DAU → large + {svc_name} LB (3–8 servers)."
+                )
+                return "\n\nPROD SETUP — cover one question per turn (START HERE):\n" + "\n".join(pending) + "\n"
+
+            if tier in ("medium", "high", "extreme") and cp.get("enable_multi_az") is None:
+                ha_detail = "multiple Droplets behind DO Load Balancer" if is_do else (
+                    "Regional MIG (multi-zone failover in GCP)" if is_gcp else
+                    "Multi-AZ for RDS + ElastiCache — automatic failover in ~60s."
+                )
+                pending.append(
+                    f"  - 🔄 HIGH AVAILABILITY: With {_safe_int(dau):,} DAU you need zero-downtime. "
+                    f"Enable {ha_detail} "
+                    f"Yes = higher reliability, No = cheaper single-zone."
+                )
+
+            if cp.get("use_asg"):
+                asg = cp.get("autoscaling_config") or {}
+                if not asg.get("cpu_threshold"):
+                    pending.append(
+                        f"  - ⚡ AUTO SCALING threshold: at what CPU% should we add a new VM? "
+                        f"Recommend 70% — gives headroom before users feel slowness. "
+                        f"(Setup: {asg.get('min_instances', 2)}–{asg.get('max_instances', 4)} VMs)"
+                    )
+                if not asg.get("health_check_path"):
+                    hc_name = "DO Load Balancer" if is_do else ("GCP HTTP Health Check" if is_gcp else "ALB")
+                    pending.append(
+                        f"  - 🏥 HEALTH CHECK path for the {hc_name}: e.g. /health, /api/health, / "
+                        f"— must return HTTP 200."
                     )
 
-            prefix = "\n\nPROD SETUP — cover one question per turn:\n" if prod else "\n\nDEV SETUP — cover one per turn:\n"
-            return (prefix + "\n".join(pending) + "\n") if pending else ""
+            if cp.get("custom_domain") is None:
+                dns_hint = "DO DNS + Let's Encrypt SSL" if is_do else (
+                    "Cloud DNS + Google-managed SSL" if is_gcp else
+                    "Route 53 + ACM SSL cert (free)"
+                )
+                pending.append(
+                    f"  - 🌐 CUSTOM DOMAIN: do you have a domain (e.g. myapp.com)? "
+                    f"Yes → we'll configure {dns_hint}. "
+                    f"No → use the LB's auto-generated IP/DNS."
+                )
+
+            if cp.get("alert_email") is None:
+                alert_svc = "DO Monitoring" if is_do else ("Cloud Monitoring + Uptime Checks" if is_gcp else "CloudWatch")
+                pending.append(
+                    f"  - 📧 ALERT EMAIL: where should {alert_svc} send CPU spike / error alerts? "
+                    f"Essential for production — you want to know before users complain. "
+                    f"Say 'skip' to disable."
+                )
+
+            if is_gcp:
+                if cp.get("iap_tunnel") is None and cp.get("ssh_key_name") is None:
+                    pending.append(
+                        "  - 🔑 VM ACCESS: IAP Tunnel (recommended — no open ports, full audit log) "
+                        "or provide SSH public key? For production, IAP is the GCP best practice."
+                    )
+            elif is_do:
+                if cp.get("ssh_key_name") is None:
+                    pending.append(
+                        "  - 🔑 SSH KEY: your DO SSH key name as saved in your DigitalOcean account. "
+                        "Used to access Droplets securely — no password needed."
+                    )
+            else:
+                if cp.get("ssh_key_name") is None and cp.get("key_pair_name") is None:
+                    pending.append(
+                        "  - 🔑 SSH ACCESS: your EC2 key pair name, or 'skip' for SSM Session Manager. "
+                        "For prod, SSM is often better — no open port 22, full audit trail."
+                    )
+                if cp.get("ssh_allowed_cidrs") is None:
+                    pending.append(
+                        "  - 🛡️  SSH CIDR: restrict SSH to your office/VPN IP. "
+                        "NEVER use 0.0.0.0/0 in production. e.g. ['203.0.113.5/32']."
+                    )
+
+            if is_gcp:
+                if not cp.get("gcp_region") and not cp.get("region"):
+                    pending.append(
+                        "  -  GCP REGION: us-central1 (USA), us-east1 (S. Carolina), europe-west1 (Belgium), "
+                        "asia-east1 (Taiwan), asia-south1 (Mumbai). Regional MIG works in all main regions."
+                    )
+            elif is_do:
+                if not cp.get("do_region") and not cp.get("region"):
+                    pending.append(
+                        "  -  DO REGION: nyc3 (New York), sfo3 (San Francisco), fra1 (Frankfurt), "
+                        "sgp1 (Singapore), ams3 (Amsterdam). DO LB is region-scoped."
+                    )
+            else:
+                if not cp.get("aws_region") and not cp.get("region"):
+                    pending.append(
+                        "  -  AWS REGION: us-east-1 (USA), eu-west-1 (Europe), ap-south-1 (India), "
+                        "ap-southeast-1 (SE Asia). Multi-AZ works in all main regions."
+                    )
+
+            if is_gcp:
+                for svc, key, hint in [
+                    ("cloud_sql", "db_config",
+                     f"Cloud SQL HA: engine, tier (db-n1-standard-1 for medium traffic), "
+                     f"failover replica={'YES (already enabled)' if cp.get('enable_multi_az') else 'TBD'}"),
+                    ("firestore",     "db_config",      "Firestore mode: Native (realtime/document) or Datastore?"),
+                    ("memorystore",   "cache_config",   "Memorystore Redis: STANDARD_HA tier recommended for prod, capacity 1-5 GB"),
+                    ("cloud_storage", "storage_config", "Cloud Storage: bucket name, versioning, lifecycle rules"),
+                    ("pubsub",        "pubsub_config",  "Pub/Sub: topic + subscription names, message retention"),
+                    ("cloud_tasks",   "tasks_config",   "Cloud Tasks: queue name, max concurrent dispatches"),
+                ]:
+                    if svc in svcs and not cp.get(key):
+                        pending.append(f"  - {hint}")
+            elif is_do:
+                for svc, key, hint in [
+                    ("pg",     "db_config",
+                     f"DO Managed PostgreSQL: node plan → {'db-s-2vcpu-4gb' if tier in ('high','extreme') else 'db-s-1vcpu-2gb'}"),
+                    ("mysql",  "db_config",
+                     f"DO Managed MySQL: node plan → {'db-s-2vcpu-4gb' if tier in ('high','extreme') else 'db-s-1vcpu-2gb'}"),
+                    ("mongo",  "db_config",  "DO Managed MongoDB: node plan, version (6 recommended)"),
+                    ("redis",  "cache_config",
+                     f"DO Managed Redis: node plan → {'db-s-1vcpu-2gb' if tier in ('high','extreme') else 'db-s-1vcpu-1gb'}"),
+                    ("spaces", "storage_config", "DO Spaces: bucket name + CDN endpoint, region"),
+                ]:
+                    if svc in svcs and not cp.get(key):
+                        pending.append(f"  - {hint}")
+            else:
+                for svc, key, hint in [
+                    ("rds", "rds_config",
+                     f"RDS config: engine, Multi-AZ={'YES' if cp.get('enable_multi_az') else 'TBD'}, "
+                     f"instance class → {'db.t3.medium' if tier in ('high','extreme') else 'db.t3.small'}"),
+                    ("dynamodb",    "db_config",
+                     "DynamoDB: table name, billing mode (PAY_PER_REQUEST recommended for prod)"),
+                    ("elasticache", "cache_config",
+                     f"ElastiCache: node type → {'cache.t3.medium' if tier in ('high','extreme') else 'cache.t3.micro'}, "
+                     f"Multi-AZ={'YES' if cp.get('enable_multi_az') else 'NO'}"),
+                    ("s3",          "storage_config", "S3: bucket name, versioning yes/no, public access"),
+                    ("sqs",         "sqs_config",     "SQS: queue names, visibility timeout, DLQ yes/no"),
+                    ("ses",         "ses_config",     "SES: verified domain or email for transactional email sending"),
+                    ("cognito",     "auth_config",    "Cognito: User Pool name, MFA yes/no, OAuth flows needed"),
+                    ("cloudfront",  "cdn_config",     "CloudFront: origin domain, price class, custom error pages"),
+                    ("waf",         "waf_config",     "WAF: managed rule groups (SQL injection, rate limiting)"),
+                ]:
+                    if svc in svcs and not cp.get(key):
+                        pending.append(f"  - {hint}")
+
+        # Secrets Manager — all providers
+        secrets_key = "use_do_secrets" if is_do else ("use_secret_manager" if is_gcp else "use_secrets_manager")
+        if not cp.get(secrets_key):
+            secret_vars = [
+                ev.get("name", "") for ev in (cp.get("required_env_vars") or [])
+                if isinstance(ev, dict) and ev.get("is_secret")
+            ]
+            if secret_vars:
+                svc_name = "DO App Platform env vars" if is_do else ("GCP Secret Manager" if is_gcp else "AWS Secrets Manager")
+                pending.append(
+                    f"  - 🔐 {svc_name}: README has {len(secret_vars)} secret(s) "
+                    f"({', '.join(secret_vars[:3])}{'...' if len(secret_vars) > 3 else ''}). "
+                    f"Store them securely? Strongly recommended for all environments."
+                )
+
+        prefix = "\n\nPROD SETUP — cover one question per turn:\n" if prod else "\n\nDEV SETUP — cover one per turn:\n"
+        return (prefix + "\n".join(pending) + "\n") if pending else ""
 
     # ── README analysis ────────────────────────────────────────────────────────
 

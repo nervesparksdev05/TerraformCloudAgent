@@ -410,7 +410,7 @@ async def submit_feedback(
     x_user_id: Optional[str] = Header(None),
 ):
     if redis_client:
-        await check_rate_limit(_rate_id(user, x_user_id), redis_client)
+        await check_rate_limit(_get_rate_id(user, x_user_id), redis_client)
 
     session = conversation_manager.get_session(session_id)
     if not session:

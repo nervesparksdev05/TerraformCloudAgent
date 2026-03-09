@@ -34,7 +34,7 @@ LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
 
 # Resolve the host based on mode
 if LANGFUSE_MODE == "cloud":
-    LANGFUSE_HOST = "https://cloud.langfuse.com"
+    LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
 else:
     # Docker mode: prefer explicit LANGFUSE_HOST, fallback to LANGFUSE_BASE_URL, then localhost
     LANGFUSE_HOST = (

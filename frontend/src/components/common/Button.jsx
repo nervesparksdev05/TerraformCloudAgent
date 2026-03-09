@@ -1,17 +1,17 @@
 import React from 'react';
 
-export const Button = ({ 
-  children, 
-  variant = 'primary', 
+export const Button = ({
+  children,
+  variant = 'primary',
   size = 'md',
   icon: Icon,
   className = '',
   disabled = false,
   onClick,
-  ...props 
+  ...props
 }) => {
   const baseClasses = 'inline-flex items-center justify-center gap-2 font-semibold transition-all duration-200 border-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed';
-  
+
   const variants = {
     primary: 'text-white hover:-translate-y-0.5 hover:shadow-lg',
     secondary: 'bg-dark-800 text-gray-100 border border-white/5 hover:bg-white/5',
@@ -19,7 +19,7 @@ export const Button = ({
     success: 'bg-green-500/10 text-green-500 border border-green-500/20 hover:bg-green-500/20',
     warning: 'bg-yellow-500/10 text-yellow-500 border border-yellow-500/20 hover:bg-yellow-500/20',
   };
-  
+
   const sizes = {
     sm: 'px-4 py-2 text-xs rounded-lg',
     md: 'px-6 py-3 text-sm rounded-xl',
@@ -32,6 +32,7 @@ export const Button = ({
 
   return (
     <button
+      type={props.type || "button"}
       className={`${baseClasses} ${variants[variant]} ${sizes[size]} ${className}`}
       style={gradientStyle}
       disabled={disabled}

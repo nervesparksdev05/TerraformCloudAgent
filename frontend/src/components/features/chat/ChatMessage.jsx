@@ -10,15 +10,24 @@ export const ChatMessage = ({ message, onSuggestionClick, sessionId }) => {
   const [rating, setRating] = useState(0);
   const [hoverRating, setHoverRating] = useState(0);
   const [submitted, setSubmitted] = useState(false);
+  const [comment, setComment] = useState("");
+  const [commentVisible, setCommentVisible] = useState(false);
 
-  const handleRate = async (value) => {
-    if (!sessionId || submitted) return;
+  const handleRate = async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    console.log("Submit button clicked!", { sessionId, rating, comment, submitted });
+    if (!sessionId || submitted || rating === 0) {
+      console.warn("Submit aborted", { sessionId, submitted, rating });
+      return;
+    }
     try {
-      await api.submitFeedback(sessionId, value);
-      setRating(value);
+      console.log("Sending feedback to API...");
+      await api.submitFeedback(sessionId, rating, comment);
+      console.log("Feedback sent successfully");
       setSubmitted(true);
-    } catch (e) {
-      console.error("Failed to submit feedback", e);
+      setCommentVisible(false);
+    } catch (err) {
+      console.error("Failed to submit feedback", err);
     }
   };
 
@@ -132,23 +141,60 @@ export const ChatMessage = ({ message, onSuggestionClick, sessionId }) => {
         )}
       </div>
 
-      {/* Feedback Stars */}
+      {/* Feedback Stars & Comment */}
       {!isUser && !message.isStreaming && sessionId && (
-        <div className="flex items-center gap-2 mt-1 px-2">
+        <div className="flex flex-col gap-2 mt-1 px-2">
           {submitted ? (
             <span className="text-xs text-green-400">Thanks for your feedback!</span>
           ) : (
-            <div className="flex items-center" onMouseLeave={() => setHoverRating(0)}>
-              {[1, 2, 3, 4, 5].map((star) => (
-                <Star
-                  key={star}
-                  size={14}
-                  className={`cursor-pointer transition-colors ${(hoverRating || rating) >= star ? 'text-yellow-400 fill-yellow-400' : 'text-gray-500'
-                    }`}
-                  onMouseEnter={() => setHoverRating(star)}
-                  onClick={() => handleRate(star)}
-                />
-              ))}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center" onMouseLeave={() => setHoverRating(0)}>
+                {[1, 2, 3, 4, 5].map((star) => (
+                  <Star
+                    key={star}
+                    size={14}
+                    className={`cursor-pointer transition-colors ${(hoverRating || rating) >= star ? 'text-yellow-400 fill-yellow-400' : 'text-gray-500'
+                      }`}
+                    onMouseEnter={() => setHoverRating(star)}
+                    onClick={() => {
+                      setRating(star);
+                      if (!commentVisible) setCommentVisible(true);
+                    }}
+                  />
+                ))}
+              </div>
+              {commentVisible && (
+                <div className="flex flex-col gap-2 w-full max-w-sm">
+                  <textarea
+                    autoFocus
+                    className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500/50 resize-none"
+                    rows={2}
+                    placeholder="Care to share why?"
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                  />
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setCommentVisible(false);
+                        setRating(0);
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={handleRate}
+                      disabled={rating === 0}
+                    >
+                      Submit Feedback
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
